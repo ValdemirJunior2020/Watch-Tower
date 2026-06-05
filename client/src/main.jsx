@@ -66,6 +66,185 @@ function snapshotValue(snapshot, key, fallback = "—") {
   return value;
 }
 
+function formatSnapshotDate(value) {
+  if (!value) return "—";
+
+  const raw = String(value);
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return raw;
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return raw;
+  }
+
+  return date.toLocaleDateString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function formatSnapshotTime(value) {
+  if (!value) return "—";
+
+  const raw = String(value);
+
+  if (/^\d{1,2}:\d{2}/.test(raw)) {
+    return raw;
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return raw;
+  }
+
+  return date.toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function getSnapshotNumber(snapshot, key) {
+  return safeNumber(snapshotValue(snapshot, key, 0));
+}
+
+function estimateAgentsNeeded(callsOnHold, agentsAvailable) {
+  const hold = safeNumber(callsOnHold);
+  const available = safeNumber(agentsAvailable);
+
+  if (hold <= 0) return 0;
+
+  return Math.max(0, Math.ceil(hold / 8) - available);
+}
+
+function buildSnapshotStory(snapshot) {
+  const date = formatSnapshotDate(snapshotValue(snapshot, "Date"));
+  const time = formatSnapshotTime(snapshotValue(snapshot, "Time"));
+
+  const callsOnHold = getSnapshotNumber(snapshot, "Calls On Hold");
+  const available = getSnapshotNumber(snapshot, "Agents Available");
+  const pastCallback = getSnapshotNumber(snapshot, "Past Callback Limit");
+  const pastVoicemail = getSnapshotNumber(snapshot, "Past Voicemail Limit");
+  const criticalFlags = getSnapshotNumber(snapshot, "Critical Count");
+  const highFlags = getSnapshotNumber(snapshot, "High Count");
+  const risk = snapshotValue(snapshot, "Company Risk Level", "Unknown");
+
+  const agentsNeeded = estimateAgentsNeeded(callsOnHold, available);
+
+  const headline = `At ${time} on ${date}, we had ${callsOnHold} calls on hold with ${available} agents available.`;
+
+  let riskMeaning = "The queue was stable at this moment.";
+
+  if (String(risk).toLowerCase() === "critical") {
+    riskMeaning =
+      "Critical means customers were waiting while the operation did not have enough live coverage to protect the queue.";
+  } else if (String(risk).toLowerCase() === "high") {
+    riskMeaning =
+      "High means the queue was building pressure and could become critical without more coverage.";
+  } else if (String(risk).toLowerCase() === "medium") {
+    riskMeaning =
+      "Medium means the queue needed attention, but it was not yet at the highest risk level.";
+  }
+
+  const details = [];
+
+  if (pastCallback > 0) {
+    details.push(`${pastCallback} calls were past callback threshold`);
+  }
+
+  if (pastVoicemail > 0) {
+    details.push(`${pastVoicemail} calls were past voicemail threshold`);
+  }
+
+  if (criticalFlags > 0) {
+    details.push(`${criticalFlags} critical call-level flags were detected`);
+  }
+
+  if (highFlags > 0) {
+    details.push(`${highFlags} high call-level flags were detected`);
+  }
+
+  const action =
+    agentsNeeded > 0
+      ? `Watchtower estimates at least ${agentsNeeded} more agents were needed at this time.`
+      : "No additional agent estimate was triggered at this moment.";
+
+  return {
+    date,
+    time,
+    risk,
+    callsOnHold,
+    available,
+    pastCallback,
+    pastVoicemail,
+    criticalFlags,
+    highFlags,
+    agentsNeeded,
+    headline,
+    details,
+    riskMeaning,
+    action,
+  };
+}
+
+function buildAgentFlagStory(dailyCritical, watchlist) {
+  const source = dailyCritical.length ? dailyCritical : watchlist;
+
+  if (!source.length) {
+    return {
+      hasAgent: false,
+      agentName: "No agent flagged yet",
+      vendor: "No call center found",
+      issue: "No agent issue has been saved yet.",
+      score: "—",
+      text: "No agent was auto-flagged in the current dashboard data yet.",
+    };
+  }
+
+  const agent = source[0];
+
+  const agentName =
+    agent["Agent Name"] ||
+    agent.agentName ||
+    agent.agent ||
+    "Unknown Agent";
+
+  const vendor =
+    agent.Vendor ||
+    agent.vendor ||
+    "Unknown";
+
+  const issue =
+    agent["Issue Type"] ||
+    agent.issueType ||
+    "queue risk";
+
+  const score =
+    agent["Average Score"] ||
+    agent.averageScore ||
+    "not available";
+
+  const callCenterText =
+    vendor === "Unknown"
+      ? "No call center was related to this agent on the live link under monitoring."
+      : `This agent was related to ${vendor}.`;
+
+  return {
+    hasAgent: true,
+    agentName,
+    vendor,
+    issue,
+    score,
+    text: `Watchtower flagged ${agentName} for ${issue}. Average score: ${score}. ${callCenterText}`,
+  };
+}
+
 function InfoTip({ text }) {
   return (
     <span className="info-tip" tabIndex={0}>
@@ -234,6 +413,99 @@ function App() {
     };
   }, [todaySnapshots, recentSnapshots]);
 
+  const operationsDiagnosis = useMemo(() => {
+    const callsOnHold = safeNumber(summary.callsOnHold);
+    const agentsAvailable = safeNumber(summary.agentsAvailable);
+    const pastCallback = safeNumber(summary.pastCallback);
+    const autoFlagged = safeNumber(summary.autoFlagged);
+
+    const repeatedZeroCoverage = snapshotStats.zeroAvailableCount;
+    const repeatedCriticalHigh = snapshotStats.criticalCount + snapshotStats.highCount;
+    const peakHold = snapshotStats.maxCallsOnHold;
+    const peakCallback = snapshotStats.maxPastCallback;
+
+    let level = "Low";
+    let headline = "Queue is currently stable.";
+    let mainProblem = "No major queue failure is showing right now.";
+    let businessImpact =
+      "Continue monitoring score risk, callback risk, vendor coverage, and schedule adherence.";
+
+    const actions = [];
+    const leadershipMessage = [];
+
+    if (callsOnHold > 0 && agentsAvailable === 0) {
+      level = "Critical";
+      headline = "Critical staffing failure: calls are waiting with 0 agents available.";
+      mainProblem = `${callsOnHold} calls are currently on hold, but there are no agents available to take calls.`;
+      businessImpact =
+        "Customers are waiting without live coverage. This can increase callback volume, repeat contacts, poor customer experience, and escalation pressure.";
+
+      actions.push("Contact vendor/team leads immediately and ask why no agents are available.");
+      actions.push("Compare scheduled agents vs agents actually available in the queue.");
+      actions.push("Prioritize calls past callback threshold first.");
+      actions.push("Check whether agents are logged in but not available, on break, idle, or off-schedule.");
+    } else if (callsOnHold >= 25) {
+      level = "High";
+      headline = "High queue pressure: calls waiting are above safe level.";
+      mainProblem = `${callsOnHold} calls are currently on hold.`;
+      businessImpact =
+        "The queue is building pressure. If staffing does not increase quickly, more calls may hit callback risk.";
+
+      actions.push("Ask vendors to increase available agents now.");
+      actions.push("Watch callback threshold closely.");
+      actions.push("Review whether breaks/lunches are overlapping during peak volume.");
+    }
+
+    if (pastCallback > 0) {
+      if (level !== "Critical") level = "High";
+
+      actions.push(`Pull and review the ${pastCallback} calls past callback threshold first.`);
+      leadershipMessage.push(`${pastCallback} calls are already past callback threshold.`);
+    }
+
+    if (autoFlagged > 0) {
+      actions.push(`Review the ${autoFlagged} auto-flagged agents before random QA sampling.`);
+      leadershipMessage.push(`${autoFlagged} agents were auto-flagged for coaching review.`);
+    }
+
+    if (repeatedZeroCoverage > 0) {
+      leadershipMessage.push(
+        `${repeatedZeroCoverage} saved snapshots showed calls waiting with 0 agents available.`
+      );
+    }
+
+    if (repeatedCriticalHigh > 0) {
+      leadershipMessage.push(`${repeatedCriticalHigh} snapshots were Critical or High risk.`);
+    }
+
+    if (peakHold > 0) {
+      leadershipMessage.push(`Peak calls on hold reached ${peakHold}.`);
+    }
+
+    if (peakCallback > 0) {
+      leadershipMessage.push(`Peak callback-risk calls reached ${peakCallback}.`);
+    }
+
+    if (!actions.length) {
+      actions.push("Continue monitoring live queue movement.");
+      actions.push("Review daily low-score agents once score averages populate.");
+      actions.push("Watch for repeated 0-available moments during peak times.");
+    }
+
+    return {
+      level,
+      headline,
+      mainProblem,
+      businessImpact,
+      actions,
+      leadershipMessage,
+    };
+  }, [summary, snapshotStats]);
+
+  const agentFlagStory = useMemo(() => {
+    return buildAgentFlagStory(dailyCritical, watchlist);
+  }, [dailyCritical, watchlist]);
+
   return (
     <main className="app-shell">
       <header className="top-header">
@@ -345,136 +617,214 @@ function App() {
         />
       </section>
 
-      <section className="panel full-panel snapshot-panel">
-        <div className="panel-title">
+      <section className="story-command-center">
+        <div className="story-header">
           <div>
+            <span className="story-eyebrow">Operations Story Center</span>
             <h2>
-              Queue Snapshot Evidence Timeline
-              <InfoTip text="Snapshots save the queue condition at exact times. This exposes when calls were waiting, when no agents were available, and when callback risk happened." />
+              What happened, what it means, and what to fix first{" "}
+              <InfoTip text="This section turns queue data into plain-English story cards so a new QA or manager can understand the issue without decoding raw numbers." />
             </h2>
             <p>
-              Historical proof of queue pressure, staffing gaps, callback risk, and company-level risk.
+              Watchtower converts every snapshot into a readable operations story: time, queue pressure,
+              callback risk, staffing need, and coaching priority.
             </p>
+          </div>
+
+          <div className={`story-risk-pill ${riskClass(operationsDiagnosis.level)}`}>
+            {operationsDiagnosis.level}
           </div>
         </div>
 
-        <div className="snapshot-summary-grid">
-          <div className="snapshot-summary-card">
-            <span>Total Snapshots</span>
+        <div className="story-diagnosis-card">
+          <span>Current diagnosis</span>
+          <h3>{operationsDiagnosis.headline}</h3>
+          <p>{operationsDiagnosis.mainProblem}</p>
+        </div>
+
+        <div className="story-action-grid">
+          <div className="story-action-card story-action-urgent">
+            <span>What to fix first</span>
+            <h3>Immediate actions</h3>
+
+            <ol>
+              {operationsDiagnosis.actions.map((action, index) => (
+                <li key={index}>{action}</li>
+              ))}
+            </ol>
+          </div>
+
+          <div className="story-action-card">
+            <span>Why leadership should care</span>
+            <h3>Business impact</h3>
+            <p>{operationsDiagnosis.businessImpact}</p>
+
+            <div className="story-proof-list">
+              {operationsDiagnosis.leadershipMessage.map((item, index) => (
+                <div key={index}>{item}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="story-summary-grid">
+          <div>
+            <span>Total snapshots</span>
             <strong>{snapshotStats.totalSnapshots}</strong>
-            <p>Saved queue moments available for review.</p>
+            <p>Saved queue moments.</p>
           </div>
 
-          <div className="snapshot-summary-card danger-summary">
-            <span>0 Available Moments</span>
+          <div>
+            <span>0 available moments</span>
             <strong>{snapshotStats.zeroAvailableCount}</strong>
-            <p>Times calls were waiting with no agents available.</p>
+            <p>Calls waiting with no agents available.</p>
           </div>
 
-          <div className="snapshot-summary-card warning-summary">
-            <span>Critical / High Risk</span>
+          <div>
+            <span>Critical / high risk</span>
             <strong>{snapshotStats.criticalCount + snapshotStats.highCount}</strong>
-            <p>Moments that need leadership visibility.</p>
+            <p>Leadership-visible moments.</p>
           </div>
 
-          <div className="snapshot-summary-card">
-            <span>Peak Calls On Hold</span>
+          <div>
+            <span>Peak hold</span>
             <strong>{snapshotStats.maxCallsOnHold}</strong>
-            <p>Highest queue pressure seen in snapshots.</p>
+            <p>Worst calls-on-hold moment.</p>
           </div>
 
-          <div className="snapshot-summary-card">
-            <span>Peak Callback Risk</span>
+          <div>
+            <span>Peak callback</span>
             <strong>{snapshotStats.maxPastCallback}</strong>
-            <p>Most calls past callback threshold at one time.</p>
+            <p>Worst callback-risk moment.</p>
           </div>
         </div>
 
         {recentSnapshots.length === 0 ? (
           <EmptyState
             title="No snapshots saved yet."
-            text="Once Render saves queue data, snapshots will appear here as historical evidence."
+            text="Once Render saves queue data, story cards will appear here."
           />
         ) : (
           <>
-            <div className="snapshot-timeline">
-              {recentSnapshots.slice(0, 8).map((snapshot, index) => {
-                const risk = snapshotValue(snapshot, "Company Risk Level", "Unknown");
+            <div className="story-card-grid">
+              {recentSnapshots.slice(0, 6).map((snapshot, index) => {
+                const story = buildSnapshotStory(snapshot);
 
                 return (
-                  <div className="snapshot-timeline-card" key={`${snapshot["Snapshot ID"]}-${index}`}>
-                    <div className="snapshot-time">
-                      <strong>{snapshotValue(snapshot, "Time")}</strong>
-                      <span>{snapshotValue(snapshot, "Date")}</span>
+                  <article className="story-card" key={`${snapshot["Snapshot ID"]}-${index}`}>
+                    <div className="story-card-top">
+                      <span className={`risk-badge ${riskClass(story.risk)}`}>
+                        {story.risk}
+                      </span>
+
+                      <div>
+                        <strong>{story.time}</strong>
+                        <small>{story.date}</small>
+                      </div>
                     </div>
 
-                    <div className="snapshot-metrics">
+                    <h3>{story.headline}</h3>
+
+                    <div className="story-metrics">
                       <div>
-                        <span>Calls Hold</span>
-                        <b>{snapshotValue(snapshot, "Calls On Hold", 0)}</b>
+                        <span>Hold</span>
+                        <b>{story.callsOnHold}</b>
                       </div>
 
                       <div>
                         <span>Available</span>
-                        <b>{snapshotValue(snapshot, "Agents Available", 0)}</b>
+                        <b>{story.available}</b>
                       </div>
 
                       <div>
                         <span>Callback</span>
-                        <b>{snapshotValue(snapshot, "Past Callback Limit", 0)}</b>
+                        <b>{story.pastCallback}</b>
+                      </div>
+
+                      <div>
+                        <span>Need</span>
+                        <b>{story.agentsNeeded}</b>
                       </div>
                     </div>
 
-                    <span className={`risk-badge ${riskClass(risk)}`}>
-                      {risk}
-                    </span>
-                  </div>
+                    <p className="story-risk-meaning">{story.riskMeaning}</p>
+
+                    {story.details.length > 0 ? (
+                      <ul className="story-detail-list">
+                        {story.details.map((item, itemIndex) => (
+                          <li key={itemIndex}>{item}.</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="story-detail-empty">
+                        No callback or voicemail threshold was triggered.
+                      </p>
+                    )}
+
+                    <div className="story-recommended-fix">
+                      <span>Recommended fix</span>
+                      <p>{story.action}</p>
+                    </div>
+                  </article>
                 );
               })}
             </div>
 
-            <div className="table-wrap snapshot-table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Time</th>
-                    <th>Calls On Hold</th>
-                    <th>Agents Available</th>
-                    <th>Past Callback</th>
-                    <th>Past Voicemail</th>
-                    <th>Auto-Flagged Agents</th>
-                    <th>Risk</th>
-                    <th>Company Reasons</th>
-                  </tr>
-                </thead>
+            <div className="agent-story-card">
+              <span>Agent watch story</span>
+              <h3>Who should QA/coaching review first?</h3>
+              <p>{agentFlagStory.text}</p>
+            </div>
 
-                <tbody>
-                  {recentSnapshots.slice(0, 20).map((snapshot, index) => {
-                    const risk = snapshotValue(snapshot, "Company Risk Level", "Unknown");
+            <div className="story-table-card">
+              <div className="story-table-title">
+                <h3>Evidence Behind The Story</h3>
+                <span>Last {Math.min(recentSnapshots.length, 20)} snapshots</span>
+              </div>
 
-                    return (
-                      <tr key={`${snapshot["Snapshot ID"]}-${index}`}>
-                        <td>{snapshotValue(snapshot, "Date")}</td>
-                        <td>{snapshotValue(snapshot, "Time")}</td>
-                        <td className="strong-cell">{snapshotValue(snapshot, "Calls On Hold", 0)}</td>
-                        <td className="strong-cell">{snapshotValue(snapshot, "Agents Available", 0)}</td>
-                        <td>{snapshotValue(snapshot, "Past Callback Limit", 0)}</td>
-                        <td>{snapshotValue(snapshot, "Past Voicemail Limit", 0)}</td>
-                        <td>{snapshotValue(snapshot, "Auto Flagged Agents", 0)}</td>
-                        <td>
-                          <span className={`risk-badge ${riskClass(risk)}`}>
-                            {risk}
-                          </span>
-                        </td>
-                        <td className="evidence-cell">
-                          {snapshotValue(snapshot, "Company Reasons")}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Time</th>
+                      <th>Calls On Hold</th>
+                      <th>Available</th>
+                      <th>Past Callback</th>
+                      <th>Past Voicemail</th>
+                      <th>Risk</th>
+                      <th>What happened</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {recentSnapshots.slice(0, 20).map((snapshot, index) => {
+                      const risk = snapshotValue(snapshot, "Company Risk Level", "Unknown");
+
+                      return (
+                        <tr key={`${snapshot["Snapshot ID"]}-${index}`}>
+                          <td>{formatSnapshotDate(snapshotValue(snapshot, "Date"))}</td>
+                          <td>{formatSnapshotTime(snapshotValue(snapshot, "Time"))}</td>
+                          <td className="strong-cell">
+                            {snapshotValue(snapshot, "Calls On Hold", 0)}
+                          </td>
+                          <td className="strong-cell">
+                            {snapshotValue(snapshot, "Agents Available", 0)}
+                          </td>
+                          <td>{snapshotValue(snapshot, "Past Callback Limit", 0)}</td>
+                          <td>{snapshotValue(snapshot, "Past Voicemail Limit", 0)}</td>
+                          <td>
+                            <span className={`risk-badge ${riskClass(risk)}`}>{risk}</span>
+                          </td>
+                          <td className="evidence-cell">
+                            {snapshotValue(snapshot, "Company Reasons")}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </>
         )}
@@ -486,7 +836,7 @@ function App() {
             <div>
               <h2>
                 <AlertTriangle size={22} />
-                Live Daily Critical Agents From Google Sheet
+                Live Daily Critical Agents From Google Sheet{" "}
                 <InfoTip text="This is your daily coaching list. It shows who needs review today based on evidence saved into the Google Sheet." />
               </h2>
               <p>Auto-saved agents that need review, coaching, or vendor follow-up.</p>
@@ -539,7 +889,7 @@ function App() {
           <div className="panel-title">
             <h2>
               <BarChart3 size={22} />
-              Agent Average Scores From The Link
+              Agent Average Scores From The Link{" "}
               <InfoTip text="This tracks agent score averages from the queue link. Low averages become coaching opportunities and may trigger auto-watchlist records." />
             </h2>
           </div>
@@ -573,7 +923,7 @@ function App() {
           <div className="panel-title">
             <h2>
               <Wifi size={22} />
-              Vendor Coverage Exposure
+              Vendor Coverage Exposure{" "}
               <InfoTip text="This helps leadership see whether the issue is agent-level, vendor-level, or staffing coverage related." />
             </h2>
           </div>
@@ -618,7 +968,7 @@ function App() {
           <div className="panel-title">
             <h2>
               <Eye size={22} />
-              Active Watchlist
+              Active Watchlist{" "}
               <InfoTip text="This is the ongoing coaching tracker. Agents stay here until marked resolved in the Google Sheet." />
             </h2>
           </div>
@@ -653,7 +1003,7 @@ function App() {
         <div className="panel-title">
           <div>
             <h2>
-              What We Can Take From The Queue Link
+              What We Can Take From The Queue Link{" "}
               <InfoTip text="This section explains the business value to leadership. It turns a simple queue page into an operations intelligence tool." />
             </h2>
             <p>Boss-friendly explanation of why this tool matters.</p>
@@ -687,7 +1037,7 @@ function App() {
         <div className="panel-title">
           <div>
             <h2>
-              Live Queue Rows / Calls To Review First
+              Live Queue Rows / Calls To Review First{" "}
               <InfoTip text="These are the queue rows currently visible from the support queue. Long waits, low scores, and high severity rows should be reviewed first." />
             </h2>
             <p>Use this as your starting point for call listening and coaching.</p>
