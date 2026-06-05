@@ -13,6 +13,7 @@ import {
   UserCheck,
   Users,
   Wifi,
+  X,
 } from "lucide-react";
 import "./styles.css";
 
@@ -193,6 +194,62 @@ function buildSnapshotStory(snapshot) {
   };
 }
 
+function normalizeFlaggedAgentFromWatchlist(item) {
+  return {
+    id: item.ID || item.id || item["Watchlist ID"] || "",
+    agentName: item["Agent Name"] || item.agentName || item.agent || "Unknown Agent",
+    vendor: item.Vendor || item.vendor || "Unknown",
+    issue: item["Issue Type"] || item.issueType || "Queue risk",
+    severity: item.Severity || item.severity || "High",
+    status: item.Status || item.status || "Monitoring",
+    evidence: item.Evidence || item.evidence || "",
+    watchOut: item["Things To Watch Out"] || item.watchOut || "",
+    coachingAction:
+      item["Coaching Action"] ||
+      item.coachingAction ||
+      "Review the call, confirm process adherence, and coach based on evidence.",
+    averageScore: item["Average Score"] || item.averageScore || "—",
+    callsSeen: item["Calls Seen Today"] || item.callsSeenToday || item.callsSeen || "—",
+    lastCallId: item["Last Queue Call ID"] || item.lastQueueCallId || item.lastCallId || "—",
+    source: "Watchlist",
+  };
+}
+
+function normalizeFlaggedAgentFromMetric(item) {
+  return {
+    id: `${item.agent || item["Agent Name"]}-${item.vendor || item.Vendor}`,
+    agentName: item.agent || item["Agent Name"] || "Unknown Agent",
+    vendor: item.vendor || item.Vendor || "Unknown",
+    issue:
+      safeNumber(item.callbackRiskCalls) > 0
+        ? "Long Wait / Callback Risk"
+        : safeNumber(item.highFlags) > 0
+        ? "High Queue Risk"
+        : safeNumber(item.criticalFlags) > 0
+        ? "Critical Queue Risk"
+        : "Automatic Queue Watch",
+    severity: item.severity || item.Severity || "High",
+    status: "Live Monitoring",
+    evidence: [
+      `Avg Score: ${formatValue(item.avgScore || item["Average Score"])}`,
+      `Calls Seen: ${formatValue(item.callsSeen || item["Calls Seen"])}`,
+      `Callback Risk Calls: ${formatValue(item.callbackRiskCalls || item["Callback Risk Calls"])}`,
+      `Critical Flags: ${formatValue(item.criticalFlags || item["Critical Flags"])}`,
+      `High Flags: ${formatValue(item.highFlags || item["High Flags"])}`,
+      `Last Call ID: ${formatValue(item.lastCallId || item["Last Queue Call ID"])}`,
+    ].join(" | "),
+    watchOut: Array.isArray(item.watchOut)
+      ? item.watchOut.join(" | ")
+      : item.watchOut || item["Things To Watch Out"] || "",
+    coachingAction:
+      "Review the flagged call exposure, confirm why the call exceeded safe queue timing, and coach based on evidence.",
+    averageScore: item.avgScore || item["Average Score"] || "—",
+    callsSeen: item.callsSeen || item["Calls Seen"] || "—",
+    lastCallId: item.lastCallId || item["Last Queue Call ID"] || "—",
+    source: "Live Agent Metrics",
+  };
+}
+
 function buildAgentFlagStory(dailyCritical, watchlist) {
   const source = dailyCritical.length ? dailyCritical : watchlist;
 
@@ -310,9 +367,16 @@ function InfoTip({ text }) {
   );
 }
 
-function StatCard({ icon, label, value, sub, danger, warning, tip }) {
+function StatCard({ icon, label, value, sub, danger, warning, tip, onClick }) {
   return (
-    <div className={`stat-card ${danger ? "danger-card" : ""} ${warning ? "warning-card" : ""}`}>
+    <button
+      type="button"
+      className={`stat-card stat-card-button ${danger ? "danger-card" : ""} ${
+        warning ? "warning-card" : ""
+      } ${onClick ? "clickable-stat-card" : ""}`}
+      onClick={onClick}
+      disabled={!onClick}
+    >
       <div className="stat-top">
         <div className="stat-icon">{icon}</div>
         <InfoTip text={tip} />
@@ -321,7 +385,7 @@ function StatCard({ icon, label, value, sub, danger, warning, tip }) {
       <p>{label}</p>
       <h2>{value}</h2>
       <span>{sub}</span>
-    </div>
+    </button>
   );
 }
 
@@ -335,12 +399,116 @@ function EmptyState({ title, text }) {
   );
 }
 
+function FlaggedAgentsModal({ open, onClose, agents }) {
+  if (!open) return null;
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="flagged-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Auto-flagged agents"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flagged-modal-header">
+          <div>
+            <span>Auto-flagged agents</span>
+            <h2>Agents Watchtower says need review now</h2>
+            <p>
+              These agents were flagged from the saved watchlist or live agent metrics.
+              Review the evidence before coaching.
+            </p>
+          </div>
+
+          <button type="button" className="modal-close-btn" onClick={onClose}>
+            <X size={22} />
+          </button>
+        </div>
+
+        {agents.length === 0 ? (
+          <div className="flagged-modal-empty">
+            <Eye size={34} />
+            <h3>No flagged agents found yet.</h3>
+            <p>
+              The dashboard shows queue risk, but no agent-level flagged records are available
+              in the current response yet. Let the monitor save one more snapshot or check the
+              Agent Watchlist tab.
+            </p>
+          </div>
+        ) : (
+          <div className="flagged-agent-grid">
+            {agents.map((agent, index) => (
+              <article className="flagged-agent-card" key={`${agent.id}-${index}`}>
+                <div className="flagged-agent-top">
+                  <div>
+                    <h3>{agent.agentName}</h3>
+                    <p>
+                      {agent.vendor === "Unknown"
+                        ? "No call center was linked to this agent in the live queue data."
+                        : `${agent.vendor} call center`}
+                    </p>
+                  </div>
+
+                  <span className={`severity-badge ${severityClass(agent.severity)}`}>
+                    {agent.severity}
+                  </span>
+                </div>
+
+                <div className="flagged-agent-metrics">
+                  <div>
+                    <span>Issue</span>
+                    <strong>{agent.issue}</strong>
+                  </div>
+
+                  <div>
+                    <span>Avg Score</span>
+                    <strong>{agent.averageScore}</strong>
+                  </div>
+
+                  <div>
+                    <span>Calls Seen</span>
+                    <strong>{agent.callsSeen}</strong>
+                  </div>
+
+                  <div>
+                    <span>Last Call</span>
+                    <strong>{agent.lastCallId}</strong>
+                  </div>
+                </div>
+
+                <div className="flagged-agent-section">
+                  <span>Evidence</span>
+                  <p>{agent.evidence || "No detailed evidence was saved for this agent yet."}</p>
+                </div>
+
+                <div className="flagged-agent-section">
+                  <span>Things to watch out</span>
+                  <p>{agent.watchOut || "No watch-out notes saved yet."}</p>
+                </div>
+
+                <div className="flagged-agent-action">
+                  <span>Recommended coaching action</span>
+                  <p>{agent.coachingAction}</p>
+                </div>
+
+                <small className="flagged-source">Source: {agent.source}</small>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function App() {
   const [dashboard, setDashboard] = useState(null);
   const [monitor, setMonitor] = useState(null);
   const [loading, setLoading] = useState(true);
   const [lastLoaded, setLastLoaded] = useState("");
   const [error, setError] = useState("");
+  const [flaggedModalOpen, setFlaggedModalOpen] = useState(false);
 
   async function loadDashboard() {
     try {
@@ -397,6 +565,7 @@ function App() {
   const scoreAverages = sheet.scoreAverages || [];
   const vendorMetrics = sheet.vendorMetrics || [];
   const liveRows = live.rows || [];
+  const liveAgentMetrics = live.agentMetrics || [];
 
   const summary = useMemo(() => {
     const callsOnHold =
@@ -417,7 +586,8 @@ function App() {
     const autoFlagged =
       safeNumber(live?.summary?.autoFlaggedAgents) ||
       safeNumber(latestSnapshot["Auto Flagged Agents"]) ||
-      safeNumber(latestSnapshot.autoFlaggedAgents);
+      safeNumber(latestSnapshot.autoFlaggedAgents) ||
+      watchlist.filter((item) => String(item.Status || "").toLowerCase() !== "resolved").length;
 
     const companyRisk =
       live?.summary?.companyRisk ||
@@ -432,7 +602,47 @@ function App() {
       autoFlagged,
       companyRisk,
     };
-  }, [live, latestSnapshot]);
+  }, [live, latestSnapshot, watchlist]);
+
+  const flaggedAgents = useMemo(() => {
+    const fromDailyCritical = dailyCritical.map(normalizeFlaggedAgentFromWatchlist);
+    const fromWatchlist = watchlist.map(normalizeFlaggedAgentFromWatchlist);
+
+    const fromLiveMetrics = liveAgentMetrics
+      .filter((agent) => ["Critical", "High"].includes(String(agent.severity || agent.Severity)))
+      .map(normalizeFlaggedAgentFromMetric);
+
+    const combined = [...fromDailyCritical, ...fromWatchlist, ...fromLiveMetrics];
+
+    const deduped = new Map();
+
+    combined.forEach((agent) => {
+      const key = `${String(agent.agentName).toLowerCase()}|${String(agent.vendor).toLowerCase()}`;
+
+      if (!deduped.has(key)) {
+        deduped.set(key, agent);
+        return;
+      }
+
+      const current = deduped.get(key);
+      const currentWeight = safeNumber(
+        current.severity === "Critical" ? 4 : current.severity === "High" ? 3 : 1
+      );
+      const nextWeight = safeNumber(
+        agent.severity === "Critical" ? 4 : agent.severity === "High" ? 3 : 1
+      );
+
+      if (nextWeight > currentWeight || agent.source === "Watchlist") {
+        deduped.set(key, agent);
+      }
+    });
+
+    return Array.from(deduped.values()).sort((a, b) => {
+      const aw = a.severity === "Critical" ? 4 : a.severity === "High" ? 3 : 1;
+      const bw = b.severity === "Critical" ? 4 : b.severity === "High" ? 3 : 1;
+      return bw - aw || String(a.agentName).localeCompare(String(b.agentName));
+    });
+  }, [dailyCritical, watchlist, liveAgentMetrics]);
 
   const snapshotStats = useMemo(() => {
     const source = todaySnapshots.length ? todaySnapshots : recentSnapshots;
@@ -672,9 +882,10 @@ function App() {
           icon={<ShieldAlert size={22} />}
           label="Auto-Flag Agents"
           value={summary.autoFlagged}
-          sub="High/Critical daily watch"
+          sub="Click to see flagged agents"
           warning={summary.autoFlagged > 0}
-          tip="Agents are automatically saved when score, duration, callback risk, or queue risk meets high/critical rules."
+          onClick={() => setFlaggedModalOpen(true)}
+          tip="Click this card to see which agents were auto-flagged, why they were flagged, and what to review first."
         />
       </section>
 
@@ -1076,7 +1287,12 @@ function App() {
           ) : (
             <div className="watchlist-stack">
               {watchlist.slice(0, 8).map((item, index) => (
-                <div className="watch-card" key={`${item.ID}-${index}`}>
+                <button
+                  type="button"
+                  className="watch-card watch-card-clickable"
+                  key={`${item.ID}-${index}`}
+                  onClick={() => setFlaggedModalOpen(true)}
+                >
                   <div>
                     <strong>{formatValue(item["Agent Name"])}</strong>
                     <span>
@@ -1087,7 +1303,7 @@ function App() {
                   <span className={`severity-badge ${severityClass(item.Severity)}`}>
                     {formatValue(item.Severity)}
                   </span>
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -1188,6 +1404,12 @@ function App() {
       <footer className="footer">
         Watchtower · QA & Utilization Intelligence · Automatic monitoring every {AUTO_REFRESH_SECONDS} seconds
       </footer>
+
+      <FlaggedAgentsModal
+        open={flaggedModalOpen}
+        onClose={() => setFlaggedModalOpen(false)}
+        agents={flaggedAgents}
+      />
     </main>
   );
 }
