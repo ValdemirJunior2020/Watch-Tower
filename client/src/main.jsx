@@ -172,8 +172,8 @@ function buildSnapshotStory(snapshot) {
 
   const action =
     agentsNeeded > 0
-      ? `Watchtower estimates at least ${agentsNeeded} more agents were needed at this time.`
-      : "No additional agent estimate was triggered at this moment.";
+      ? `Watchtower estimates at least ${agentsNeeded} more available agents were needed at this time.`
+      : "No extra-agent estimate was triggered at this moment.";
 
   return {
     date,
@@ -242,6 +242,62 @@ function buildAgentFlagStory(dailyCritical, watchlist) {
     issue,
     score,
     text: `Watchtower flagged ${agentName} for ${issue}. Average score: ${score}. ${callCenterText}`,
+  };
+}
+
+function buildCoverageNeedStory(summary, snapshotStats, vendorMetrics) {
+  const callsOnHold = safeNumber(summary.callsOnHold);
+  const agentsAvailable = safeNumber(summary.agentsAvailable);
+  const pastCallback = safeNumber(summary.pastCallback);
+  const estimatedAgentsNeeded = estimateAgentsNeeded(callsOnHold, agentsAvailable);
+
+  const sortedVendors = [...vendorMetrics].sort((a, b) => {
+    const aRisk =
+      safeNumber(a["Critical Flags"]) * 3 +
+      safeNumber(a["High Flags"]) * 2 +
+      safeNumber(a["Calls Seen"]);
+
+    const bRisk =
+      safeNumber(b["Critical Flags"]) * 3 +
+      safeNumber(b["High Flags"]) * 2 +
+      safeNumber(b["Calls Seen"]);
+
+    return bRisk - aRisk;
+  });
+
+  const topVendor = sortedVendors[0];
+
+  let callCenterName = "Unknown";
+  let callCenterMessage =
+    "No specific call center can be confirmed from the live link for this coverage gap yet.";
+
+  if (topVendor?.Vendor && topVendor.Vendor !== "Unknown") {
+    callCenterName = topVendor.Vendor;
+    callCenterMessage = `${topVendor.Vendor} is the strongest call-center signal in today’s saved vendor data.`;
+  }
+
+  let headline = "Coverage looks stable right now.";
+  let recommendation = "No extra-agent estimate is triggered right now.";
+
+  if (estimatedAgentsNeeded > 0) {
+    headline = `Overall queue needs about ${estimatedAgentsNeeded} more available agents right now.`;
+    recommendation =
+      callCenterName === "Unknown"
+        ? `Watchtower estimates ${estimatedAgentsNeeded} more available agents are needed, but the live link does not confirm which call center owns the gap.`
+        : `Watchtower estimates ${estimatedAgentsNeeded} more available agents are needed. Start by validating live coverage with ${callCenterName}.`;
+  }
+
+  return {
+    callCenterName,
+    estimatedAgentsNeeded,
+    callsOnHold,
+    agentsAvailable,
+    pastCallback,
+    peakHold: snapshotStats.maxCallsOnHold,
+    peakCallback: snapshotStats.maxPastCallback,
+    headline,
+    callCenterMessage,
+    recommendation,
   };
 }
 
@@ -435,15 +491,16 @@ function App() {
 
     if (callsOnHold > 0 && agentsAvailable === 0) {
       level = "Critical";
-      headline = "Critical staffing failure: calls are waiting with 0 agents available.";
+      headline = "Critical coverage gap: calls are waiting with 0 agents available.";
       mainProblem = `${callsOnHold} calls are currently on hold, but there are no agents available to take calls.`;
       businessImpact =
         "Customers are waiting without live coverage. This can increase callback volume, repeat contacts, poor customer experience, and escalation pressure.";
 
-      actions.push("Contact vendor/team leads immediately and ask why no agents are available.");
-      actions.push("Compare scheduled agents vs agents actually available in the queue.");
-      actions.push("Prioritize calls past callback threshold first.");
-      actions.push("Check whether agents are logged in but not available, on break, idle, or off-schedule.");
+      actions.push("Contact vendor/team leads and request live coverage confirmation.");
+      actions.push("Ask each vendor how many agents are actively covering the queue right now.");
+      actions.push("Use this snapshot as evidence to request the schedule/roster data needed for exact schedule adherence tracking.");
+      actions.push("Prioritize callback-risk calls before random QA review.");
+      actions.push("Validate agent status from the live tools: available, on call, unavailable, break, lunch, or not logged in.");
     } else if (callsOnHold >= 25) {
       level = "High";
       headline = "High queue pressure: calls waiting are above safe level.";
@@ -451,15 +508,15 @@ function App() {
       businessImpact =
         "The queue is building pressure. If staffing does not increase quickly, more calls may hit callback risk.";
 
-      actions.push("Ask vendors to increase available agents now.");
+      actions.push("Ask vendors to confirm live coverage and increase available agents if possible.");
       actions.push("Watch callback threshold closely.");
-      actions.push("Review whether breaks/lunches are overlapping during peak volume.");
+      actions.push("Request roster/schedule data so Watchtower can compare expected coverage vs actual coverage.");
     }
 
     if (pastCallback > 0) {
       if (level !== "Critical") level = "High";
 
-      actions.push(`Pull and review the ${pastCallback} calls past callback threshold first.`);
+      actions.push(`Review the ${pastCallback} callback-risk calls first because they are already outside the safe waiting window.`);
       leadershipMessage.push(`${pastCallback} calls are already past callback threshold.`);
     }
 
@@ -505,6 +562,10 @@ function App() {
   const agentFlagStory = useMemo(() => {
     return buildAgentFlagStory(dailyCritical, watchlist);
   }, [dailyCritical, watchlist]);
+
+  const coverageNeedStory = useMemo(() => {
+    return buildCoverageNeedStory(summary, snapshotStats, vendorMetrics);
+  }, [summary, snapshotStats, vendorMetrics]);
 
   return (
     <main className="app-shell">
@@ -644,8 +705,8 @@ function App() {
 
         <div className="story-action-grid">
           <div className="story-action-card story-action-urgent">
-            <span>What to fix first</span>
-            <h3>Immediate actions</h3>
+            <span>Recommended next steps</span>
+            <h3>Coverage actions to validate now</h3>
 
             <ol>
               {operationsDiagnosis.actions.map((action, index) => (
@@ -663,6 +724,40 @@ function App() {
               {operationsDiagnosis.leadershipMessage.map((item, index) => (
                 <div key={index}>{item}</div>
               ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="coverage-need-card">
+          <div>
+            <span>Coverage need estimate</span>
+            <h3>{coverageNeedStory.headline}</h3>
+            <p>{coverageNeedStory.recommendation}</p>
+          </div>
+
+          <div className="coverage-need-details">
+            <div>
+              <span>Call Center Signal</span>
+              <strong>{coverageNeedStory.callCenterName}</strong>
+              <small>{coverageNeedStory.callCenterMessage}</small>
+            </div>
+
+            <div>
+              <span>Estimated Extra Agents</span>
+              <strong>{coverageNeedStory.estimatedAgentsNeeded}</strong>
+              <small>Based on calls on hold divided by 8.</small>
+            </div>
+
+            <div>
+              <span>Current Pressure</span>
+              <strong>{coverageNeedStory.callsOnHold}</strong>
+              <small>Calls currently on hold.</small>
+            </div>
+
+            <div>
+              <span>Callback Risk</span>
+              <strong>{coverageNeedStory.pastCallback}</strong>
+              <small>Calls already past callback threshold.</small>
             </div>
           </div>
         </div>

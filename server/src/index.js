@@ -129,20 +129,54 @@ function extractAgentName(text = "") {
   const source = cleanText(text);
 
   const patterns = [
-    /assigned\s+to\s+([A-Za-zÀ-ÿ' .-]{2,80})(?=\s+(?:Wns|WNS|Tep|TEP|Teleperformance|Con|Concentrix|Buw|Buwelo|Telus|support|call|$))/i,
-    /connectAgent\s+([A-Za-zÀ-ÿ' .-]{2,80})(?=\s+(?:Wns|WNS|Tep|TEP|Teleperformance|Con|Concentrix|Buw|Buwelo|Telus|support|call|$))/i,
-    /agent\s*[:#-]?\s*([A-Za-zÀ-ÿ' .-]{2,80})(?=\s+(?:Wns|WNS|Tep|TEP|Teleperformance|Con|Concentrix|Buw|Buwelo|Telus|support|call|$))/i,
+    /call\s+assigned\s+to\s+([A-Za-zÀ-ÿ' .-]{2,100})\s*\((?:Wns|WNS|Buw|BUW|Buwelo|Con|CON|Tep|TEP|Telus|TELUS)\)/i,
+    /assigned\s+to\s+([A-Za-zÀ-ÿ' .-]{2,100})\s*\((?:Wns|WNS|Buw|BUW|Buwelo|Con|CON|Tep|TEP|Telus|TELUS)\)/i,
+    /call\s+assigned\s+to\s+([A-Za-zÀ-ÿ' .-]{2,100})(?=\s+\(|\s+account_id|\s+support_id|\s+\||$)/i,
+    /assigned\s+to\s+([A-Za-zÀ-ÿ' .-]{2,100})(?=\s+\(|\s+account_id|\s+support_id|\s+\||$)/i,
+    /connectAgent\s+([A-Za-zÀ-ÿ' .-]{2,100})(?=\s+(?:Wns|WNS|Tep|TEP|Teleperformance|Con|Concentrix|Buw|Buwelo|Telus|support|call|$))/i,
+    /agent\s*[:#-]?\s*([A-Za-zÀ-ÿ' .-]{2,100})(?=\s+(?:Wns|WNS|Tep|TEP|Teleperformance|Con|Concentrix|Buw|Buwelo|Telus|support|call|$))/i,
   ];
 
   for (const pattern of patterns) {
     const match = source.match(pattern);
 
     if (match?.[1]) {
-      return cleanText(match[1]).replace(/[|,;:-]+$/g, "").trim();
+      const name = cleanText(match[1])
+        .replace(/\s*\(.*?\)\s*/g, "")
+        .replace(/\baccount_id\b.*$/i, "")
+        .replace(/\bsupport_id\b.*$/i, "")
+        .replace(/[|,;:-]+$/g, "")
+        .trim();
+
+      if (
+        name &&
+        !/^(call|assigned|agent|notes|caller|score|duration|last action)$/i.test(name)
+      ) {
+        return name;
+      }
     }
   }
 
   return "";
+}
+
+function isHeaderLikeRow(joined = "") {
+  const t = cleanText(joined).toLowerCase();
+
+  if (!t) return true;
+
+  const headerSignals = [
+    "call id",
+    "duration",
+    "score",
+    "caller | notes",
+    "last action",
+    "called | caller",
+  ];
+
+  const signalCount = headerSignals.filter((signal) => t.includes(signal)).length;
+
+  return signalCount >= 2;
 }
 
 function scoreRisk(score) {
@@ -467,7 +501,7 @@ function parseQueueHtml(html) {
 
     const joined = cleanText(cells.join(" | "));
 
-    if (!joined || /Call ID\s+Duration\s+Score/i.test(joined)) return;
+    if (isHeaderLikeRow(joined)) return;
 
     const numericCells = cells
       .map((c) => Number(c))
@@ -481,6 +515,10 @@ function parseQueueHtml(html) {
 
     const score = Number(cells[2]) || Number(numericCells[1] || 0);
 
+    const notes = cells.slice(5, -1).join(" | ") || joined;
+    const agent = extractAgentName(notes) || extractAgentName(joined);
+    const vendor = normalizeVendor(notes) || normalizeVendor(joined);
+
     rows.push({
       callId: cells[0] || `row-${rows.length + 1}`,
       durationSeconds,
@@ -488,10 +526,10 @@ function parseQueueHtml(html) {
       score,
       called: cells[3] || "",
       caller: cells[4] || "",
-      notes: cells.slice(5, -1).join(" | ") || joined,
+      notes,
       lastAction: cells[cells.length - 1] || "",
-      agent: extractAgentName(joined),
-      vendor: normalizeVendor(joined),
+      agent,
+      vendor,
     });
   });
 
@@ -646,8 +684,6 @@ function buildLimitedQueueForSheet(queue, reason) {
   const limitedQueueForSheet = {
     ...queue,
     monitorReason: reason,
-
-    // Keep the Google Sheet save fast.
     rows: Array.isArray(queue.rows) ? queue.rows.slice(0, 80) : [],
     agentMetrics: Array.isArray(queue.agentMetrics) ? queue.agentMetrics.slice(0, 80) : [],
     vendorMetrics: Array.isArray(queue.vendorMetrics) ? queue.vendorMetrics : [],
