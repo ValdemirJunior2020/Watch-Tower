@@ -17,6 +17,7 @@ import {
 import "./styles.css";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:8080";
+
 const GOOGLE_SHEET_DATABASE_URL =
   import.meta.env.VITE_GOOGLE_SHEET_DATABASE_URL ||
   "https://docs.google.com/spreadsheets/d/13IxCpTTyUXF-ssFI7PcSbO8xfsauJvkZkOPQcpETJc4/edit?gid=1129431701#gid=1129431701";
@@ -35,11 +36,34 @@ function formatValue(value, fallback = "—") {
 
 function severityClass(value) {
   const sev = String(value || "").toLowerCase();
+
   if (sev === "critical") return "severity-critical";
   if (sev === "high") return "severity-high";
   if (sev === "medium") return "severity-medium";
   if (sev === "low") return "severity-low";
+
   return "severity-neutral";
+}
+
+function riskClass(value) {
+  const risk = String(value || "").toLowerCase();
+
+  if (risk === "critical") return "risk-critical";
+  if (risk === "high") return "risk-high";
+  if (risk === "medium") return "risk-medium";
+  if (risk === "low") return "risk-low";
+
+  return "risk-neutral";
+}
+
+function snapshotValue(snapshot, key, fallback = "—") {
+  const value = snapshot?.[key];
+
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  return value;
 }
 
 function InfoTip({ text }) {
@@ -58,6 +82,7 @@ function StatCard({ icon, label, value, sub, danger, warning, tip }) {
         <div className="stat-icon">{icon}</div>
         <InfoTip text={tip} />
       </div>
+
       <p>{label}</p>
       <h2>{value}</h2>
       <span>{sub}</span>
@@ -93,10 +118,14 @@ function App() {
 
       if (dashboardRes.status === "fulfilled" && dashboardRes.value.ok) {
         const data = await dashboardRes.value.json();
-        if (data.ok) setDashboard(data);
-        else setError(data.error || "Dashboard returned an error.");
+
+        if (data.ok) {
+          setDashboard(data);
+        } else {
+          setError(data.error || "Dashboard returned an error.");
+        }
       } else {
-        setError("Unable to load dashboard from server.");
+        setError("Watchtower server is waking up. Retrying automatically...");
       }
 
       if (monitorRes.status === "fulfilled" && monitorRes.value.ok) {
@@ -106,7 +135,7 @@ function App() {
 
       setLastLoaded(new Date().toLocaleString());
     } catch (err) {
-      setError(err.message || "Failed to load Watchtower dashboard.");
+      setError("Watchtower server is waking up. Retrying automatically...");
     } finally {
       setLoading(false);
     }
@@ -123,8 +152,11 @@ function App() {
   }, []);
 
   const sheet = dashboard?.sheetDashboard || dashboard?.dashboard || {};
-  const live = dashboard?.liveQueue || {};
+  const live = dashboard?.liveQueue || dashboard?.queue || {};
+
   const latestSnapshot = sheet.latestSnapshot || {};
+  const recentSnapshots = sheet.recentSnapshots || [];
+  const todaySnapshots = sheet.todaySnapshots || [];
   const dailyCritical = sheet.dailyCritical || [];
   const watchlist = sheet.watchlist || [];
   const scoreAverages = sheet.scoreAverages || [];
@@ -166,6 +198,41 @@ function App() {
       companyRisk,
     };
   }, [live, latestSnapshot]);
+
+  const snapshotStats = useMemo(() => {
+    const source = todaySnapshots.length ? todaySnapshots : recentSnapshots;
+
+    const totalSnapshots = source.length;
+
+    const zeroAvailableCount = source.filter((s) => {
+      return safeNumber(s["Agents Available"]) === 0 && safeNumber(s["Calls On Hold"]) > 0;
+    }).length;
+
+    const criticalCount = source.filter((s) => {
+      return String(s["Company Risk Level"] || "").toLowerCase() === "critical";
+    }).length;
+
+    const highCount = source.filter((s) => {
+      return String(s["Company Risk Level"] || "").toLowerCase() === "high";
+    }).length;
+
+    const maxCallsOnHold = source.reduce((max, s) => {
+      return Math.max(max, safeNumber(s["Calls On Hold"]));
+    }, 0);
+
+    const maxPastCallback = source.reduce((max, s) => {
+      return Math.max(max, safeNumber(s["Past Callback Limit"]));
+    }, 0);
+
+    return {
+      totalSnapshots,
+      zeroAvailableCount,
+      criticalCount,
+      highCount,
+      maxCallsOnHold,
+      maxPastCallback,
+    };
+  }, [todaySnapshots, recentSnapshots]);
 
   return (
     <main className="app-shell">
@@ -237,7 +304,7 @@ function App() {
       <div className="sheet-load-banner">
         {loading
           ? "Loading Watchtower data from Google Sheets and live queue..."
-          : `Loaded today’s critical agents and average scores from Google Sheets. Last update: ${lastLoaded}`}
+          : `Loaded today’s critical agents, average scores, and snapshot evidence from Google Sheets. Last update: ${lastLoaded}`}
       </div>
 
       <section className="stats-grid">
@@ -278,6 +345,141 @@ function App() {
         />
       </section>
 
+      <section className="panel full-panel snapshot-panel">
+        <div className="panel-title">
+          <div>
+            <h2>
+              Queue Snapshot Evidence Timeline
+              <InfoTip text="Snapshots save the queue condition at exact times. This exposes when calls were waiting, when no agents were available, and when callback risk happened." />
+            </h2>
+            <p>
+              Historical proof of queue pressure, staffing gaps, callback risk, and company-level risk.
+            </p>
+          </div>
+        </div>
+
+        <div className="snapshot-summary-grid">
+          <div className="snapshot-summary-card">
+            <span>Total Snapshots</span>
+            <strong>{snapshotStats.totalSnapshots}</strong>
+            <p>Saved queue moments available for review.</p>
+          </div>
+
+          <div className="snapshot-summary-card danger-summary">
+            <span>0 Available Moments</span>
+            <strong>{snapshotStats.zeroAvailableCount}</strong>
+            <p>Times calls were waiting with no agents available.</p>
+          </div>
+
+          <div className="snapshot-summary-card warning-summary">
+            <span>Critical / High Risk</span>
+            <strong>{snapshotStats.criticalCount + snapshotStats.highCount}</strong>
+            <p>Moments that need leadership visibility.</p>
+          </div>
+
+          <div className="snapshot-summary-card">
+            <span>Peak Calls On Hold</span>
+            <strong>{snapshotStats.maxCallsOnHold}</strong>
+            <p>Highest queue pressure seen in snapshots.</p>
+          </div>
+
+          <div className="snapshot-summary-card">
+            <span>Peak Callback Risk</span>
+            <strong>{snapshotStats.maxPastCallback}</strong>
+            <p>Most calls past callback threshold at one time.</p>
+          </div>
+        </div>
+
+        {recentSnapshots.length === 0 ? (
+          <EmptyState
+            title="No snapshots saved yet."
+            text="Once Render saves queue data, snapshots will appear here as historical evidence."
+          />
+        ) : (
+          <>
+            <div className="snapshot-timeline">
+              {recentSnapshots.slice(0, 8).map((snapshot, index) => {
+                const risk = snapshotValue(snapshot, "Company Risk Level", "Unknown");
+
+                return (
+                  <div className="snapshot-timeline-card" key={`${snapshot["Snapshot ID"]}-${index}`}>
+                    <div className="snapshot-time">
+                      <strong>{snapshotValue(snapshot, "Time")}</strong>
+                      <span>{snapshotValue(snapshot, "Date")}</span>
+                    </div>
+
+                    <div className="snapshot-metrics">
+                      <div>
+                        <span>Calls Hold</span>
+                        <b>{snapshotValue(snapshot, "Calls On Hold", 0)}</b>
+                      </div>
+
+                      <div>
+                        <span>Available</span>
+                        <b>{snapshotValue(snapshot, "Agents Available", 0)}</b>
+                      </div>
+
+                      <div>
+                        <span>Callback</span>
+                        <b>{snapshotValue(snapshot, "Past Callback Limit", 0)}</b>
+                      </div>
+                    </div>
+
+                    <span className={`risk-badge ${riskClass(risk)}`}>
+                      {risk}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="table-wrap snapshot-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Time</th>
+                    <th>Calls On Hold</th>
+                    <th>Agents Available</th>
+                    <th>Past Callback</th>
+                    <th>Past Voicemail</th>
+                    <th>Auto-Flagged Agents</th>
+                    <th>Risk</th>
+                    <th>Company Reasons</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {recentSnapshots.slice(0, 20).map((snapshot, index) => {
+                    const risk = snapshotValue(snapshot, "Company Risk Level", "Unknown");
+
+                    return (
+                      <tr key={`${snapshot["Snapshot ID"]}-${index}`}>
+                        <td>{snapshotValue(snapshot, "Date")}</td>
+                        <td>{snapshotValue(snapshot, "Time")}</td>
+                        <td className="strong-cell">{snapshotValue(snapshot, "Calls On Hold", 0)}</td>
+                        <td className="strong-cell">{snapshotValue(snapshot, "Agents Available", 0)}</td>
+                        <td>{snapshotValue(snapshot, "Past Callback Limit", 0)}</td>
+                        <td>{snapshotValue(snapshot, "Past Voicemail Limit", 0)}</td>
+                        <td>{snapshotValue(snapshot, "Auto Flagged Agents", 0)}</td>
+                        <td>
+                          <span className={`risk-badge ${riskClass(risk)}`}>
+                            {risk}
+                          </span>
+                        </td>
+                        <td className="evidence-cell">
+                          {snapshotValue(snapshot, "Company Reasons")}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+
       <section className="dashboard-grid">
         <div className="panel large-panel">
           <div className="panel-title">
@@ -310,6 +512,7 @@ function App() {
                     <th>Evidence</th>
                   </tr>
                 </thead>
+
                 <tbody>
                   {dailyCritical.slice(0, 12).map((item, index) => (
                     <tr key={`${item["Watchlist ID"] || item["Agent Name"]}-${index}`}>
@@ -352,8 +555,11 @@ function App() {
                 <div className="score-row" key={`${agent["Agent Name"]}-${index}`}>
                   <div>
                     <strong>{formatValue(agent["Agent Name"])}</strong>
-                    <span>{formatValue(agent.Vendor)} · {formatValue(agent["Calls Seen"])} calls</span>
+                    <span>
+                      {formatValue(agent.Vendor)} · {formatValue(agent["Calls Seen"])} calls
+                    </span>
                   </div>
+
                   <div className="score-number">{formatValue(agent["Average Score"])}</div>
                 </div>
               ))}
@@ -382,18 +588,22 @@ function App() {
               {vendorMetrics.map((vendor, index) => (
                 <div className="vendor-card" key={`${vendor.Vendor}-${index}`}>
                   <strong>{formatValue(vendor.Vendor)}</strong>
+
                   <div>
                     <span>Calls Seen</span>
                     <b>{formatValue(vendor["Calls Seen"])}</b>
                   </div>
+
                   <div>
                     <span>Agents Seen</span>
                     <b>{formatValue(vendor["Agents Seen"])}</b>
                   </div>
+
                   <div>
                     <span>Avg Score</span>
                     <b>{formatValue(vendor["Average Score"])}</b>
                   </div>
+
                   <div>
                     <span>Critical</span>
                     <b>{formatValue(vendor["Critical Flags"])}</b>
@@ -424,8 +634,11 @@ function App() {
                 <div className="watch-card" key={`${item.ID}-${index}`}>
                   <div>
                     <strong>{formatValue(item["Agent Name"])}</strong>
-                    <span>{formatValue(item.Vendor)} · {formatValue(item["Issue Type"])}</span>
+                    <span>
+                      {formatValue(item.Vendor)} · {formatValue(item["Issue Type"])}
+                    </span>
                   </div>
+
                   <span className={`severity-badge ${severityClass(item.Severity)}`}>
                     {formatValue(item.Severity)}
                   </span>
@@ -501,6 +714,7 @@ function App() {
                   <th>Reasons</th>
                 </tr>
               </thead>
+
               <tbody>
                 {liveRows.slice(0, 25).map((row, index) => (
                   <tr key={`${row.callId}-${index}`}>
@@ -515,7 +729,9 @@ function App() {
                         {formatValue(row.severity)}
                       </span>
                     </td>
-                    <td className="evidence-cell">{Array.isArray(row.reasons) ? row.reasons.join(" | ") : formatValue(row.reasons)}</td>
+                    <td className="evidence-cell">
+                      {Array.isArray(row.reasons) ? row.reasons.join(" | ") : formatValue(row.reasons)}
+                    </td>
                   </tr>
                 ))}
               </tbody>

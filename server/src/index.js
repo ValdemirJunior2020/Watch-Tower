@@ -95,7 +95,11 @@ function durationFromText(text = "") {
   const hms = t.match(/(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?/i);
 
   if (hms && (hms[1] || hms[2] || hms[3])) {
-    return Number(hms[1] || 0) * 3600 + Number(hms[2] || 0) * 60 + Number(hms[3] || 0);
+    return (
+      Number(hms[1] || 0) * 3600 +
+      Number(hms[2] || 0) * 60 +
+      Number(hms[3] || 0)
+    );
   }
 
   const seconds = t.match(/(\d+)\s*(?:sec|second|seconds|s)\b/i);
@@ -502,33 +506,6 @@ function parseQueueHtml(html) {
   });
 }
 
-async function fetchQueue() {
-  const response = await fetch(HP_QUEUE_URL, {
-    headers: {
-      "User-Agent": "HotelPlanner-Watchtower/3.0",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      ...(HP_COOKIE ? { Cookie: HP_COOKIE } : {}),
-    },
-  });
-
-  const html = await response.text();
-
-  if (!response.ok) {
-    throw new Error(`HotelPlanner returned ${response.status}: ${html.slice(0, 180)}`);
-  }
-
-  if (/login|password|sign in/i.test(html) && !/Customer Service Calls on Hold/i.test(html)) {
-    throw new Error(
-      "HotelPlanner page appears to require a valid login/session cookie. Add HP_COOKIE in Render environment variables."
-    );
-  }
-
-  const queue = parseQueueHtml(html);
-  lastLiveQueue = queue;
-
-  return queue;
-}
-
 async function readResponseOnceAsJson(response) {
   const raw = await response.text();
 
@@ -543,26 +520,86 @@ async function readResponseOnceAsJson(response) {
   }
 }
 
+async function fetchQueue() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+
+  try {
+    const response = await fetch(HP_QUEUE_URL, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "HotelPlanner-Watchtower/3.0",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ...(HP_COOKIE ? { Cookie: HP_COOKIE } : {}),
+      },
+    });
+
+    const html = await response.text();
+
+    if (!response.ok) {
+      throw new Error(`HotelPlanner returned ${response.status}: ${html.slice(0, 180)}`);
+    }
+
+    if (/login|password|sign in/i.test(html) && !/Customer Service Calls on Hold/i.test(html)) {
+      throw new Error(
+        "HotelPlanner page appears to require a valid login/session cookie. Add HP_COOKIE in Render environment variables."
+      );
+    }
+
+    const queue = parseQueueHtml(html);
+    lastLiveQueue = queue;
+
+    return queue;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("HotelPlanner queue fetch timed out after 12 seconds.");
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function googleScriptGet(action) {
   if (!GOOGLE_SCRIPT_URL) {
     throw new Error("GOOGLE_SCRIPT_URL is missing in server environment variables.");
   }
 
-  const url = new URL(GOOGLE_SCRIPT_URL);
-  url.searchParams.set("action", action);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
 
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    redirect: "follow",
-  });
+  try {
+    const url = new URL(GOOGLE_SCRIPT_URL);
+    url.searchParams.set("action", action);
+    url.searchParams.set("cacheBust", Date.now().toString());
 
-  const data = await readResponseOnceAsJson(response);
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+      },
+    });
 
-  if (!response.ok || data.ok === false) {
-    throw new Error(data.error || `Google Apps Script GET failed: ${response.status}`);
+    const data = await readResponseOnceAsJson(response);
+
+    if (!response.ok || data.ok === false) {
+      throw new Error(data.error || `Google Apps Script GET failed: ${response.status}`);
+    }
+
+    return data;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Google Apps Script dashboard fetch timed out after 12 seconds.");
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  return data;
 }
 
 async function postToGoogleScript(action, payload) {
@@ -570,25 +607,85 @@ async function postToGoogleScript(action, payload) {
     throw new Error("GOOGLE_SCRIPT_URL is missing in server environment variables.");
   }
 
-  const response = await fetch(GOOGLE_SCRIPT_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/plain;charset=utf-8",
-    },
-    body: JSON.stringify({
-      action,
-      payload,
-    }),
-    redirect: "follow",
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45000);
 
-  const data = await readResponseOnceAsJson(response);
+  try {
+    const response = await fetch(GOOGLE_SCRIPT_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain;charset=utf-8",
+      },
+      body: JSON.stringify({
+        action,
+        payload,
+      }),
+      redirect: "follow",
+      signal: controller.signal,
+    });
 
-  if (!response.ok || data.ok === false) {
-    throw new Error(data.error || `Google Script returned ${response.status}`);
+    const data = await readResponseOnceAsJson(response);
+
+    if (!response.ok || data.ok === false) {
+      throw new Error(data.error || `Google Script returned ${response.status}`);
+    }
+
+    return data;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Google Apps Script POST timed out after 45 seconds.");
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
+}
 
-  return data;
+function buildLimitedQueueForSheet(queue, reason) {
+  const limitedQueueForSheet = {
+    ...queue,
+    monitorReason: reason,
+
+    // Keep the Google Sheet save fast.
+    rows: Array.isArray(queue.rows) ? queue.rows.slice(0, 80) : [],
+    agentMetrics: Array.isArray(queue.agentMetrics) ? queue.agentMetrics.slice(0, 80) : [],
+    vendorMetrics: Array.isArray(queue.vendorMetrics) ? queue.vendorMetrics : [],
+  };
+
+  limitedQueueForSheet.rows = limitedQueueForSheet.rows.map((row) => ({
+    callId: row.callId || "",
+    durationSeconds: Number(row.durationSeconds || 0),
+    durationLabel: row.durationLabel || "",
+    score: Number(row.score || 0),
+    called: row.called || "",
+    caller: row.caller || "",
+    agent: row.agent || "",
+    vendor: row.vendor || "Unknown",
+    lastAction: row.lastAction || "",
+    severity: row.severity || "Low",
+    reasons: Array.isArray(row.reasons) ? row.reasons.slice(0, 4) : [],
+    notes: String(row.notes || "").slice(0, 300),
+  }));
+
+  limitedQueueForSheet.agentMetrics = limitedQueueForSheet.agentMetrics.map((agent) => ({
+    agent: agent.agent || "",
+    vendor: agent.vendor || "Unknown",
+    callsSeen: Number(agent.callsSeen || 0),
+    scoredCalls: Number(agent.scoredCalls || 0),
+    avgScore: Number(agent.avgScore || 0),
+    lowestScore: Number(agent.lowestScore || 0),
+    highestScore: Number(agent.highestScore || 0),
+    maxDurationSeconds: Number(agent.maxDurationSeconds || 0),
+    callbackRiskCalls: Number(agent.callbackRiskCalls || 0),
+    criticalFlags: Number(agent.criticalFlags || 0),
+    highFlags: Number(agent.highFlags || 0),
+    lastCallId: agent.lastCallId || "",
+    watchOut: Array.isArray(agent.watchOut) ? agent.watchOut.slice(0, 6) : [],
+    severity: agent.severity || "Low",
+  }));
+
+  return limitedQueueForSheet;
 }
 
 async function runMonitorOnce(reason = "scheduled") {
@@ -597,11 +694,10 @@ async function runMonitorOnce(reason = "scheduled") {
   try {
     const queue = await fetchQueue();
 
+    const limitedQueueForSheet = buildLimitedQueueForSheet(queue, reason);
+
     const sheetResult = GOOGLE_SCRIPT_URL
-      ? await postToGoogleScript("saveQueueSnapshot", {
-          ...queue,
-          monitorReason: reason,
-        })
+      ? await postToGoogleScript("saveQueueSnapshot", limitedQueueForSheet)
       : {
           skipped: true,
           reason: "No GOOGLE_SCRIPT_URL configured",
@@ -616,6 +712,8 @@ async function runMonitorOnce(reason = "scheduled") {
       finishedAt: lastMonitorRun,
       reason,
       queueSummary: queue.summary,
+      savedRows: limitedQueueForSheet.rows.length,
+      savedAgentMetrics: limitedQueueForSheet.agentMetrics.length,
       sheetResult,
     };
 
@@ -803,13 +901,22 @@ app.get("/api/dashboard", async (_, res) => {
   try {
     liveQueue = await fetchQueue();
   } catch (liveError) {
+    console.error("Live queue fetch failed:", liveError.message);
+
     if (!liveQueue) {
       liveQueue = buildEmptyLiveQueue(liveError.message);
+    } else {
+      liveQueue = {
+        ...liveQueue,
+        warning: liveError.message,
+      };
     }
   }
 
   let sheetDashboard = {
     latestSnapshot: null,
+    recentSnapshots: [],
+    todaySnapshots: [],
     watchlist: [],
     dailyCritical: [],
     scoreAverages: [],
@@ -821,6 +928,7 @@ app.get("/api/dashboard", async (_, res) => {
       const sheetData = await googleScriptGet("dashboard");
       sheetDashboard = sheetData.dashboard || sheetData.sheetDashboard || sheetDashboard;
     } catch (sheetError) {
+      console.error("Google Sheet dashboard fetch failed:", sheetError.message);
       sheetDashboard.error = sheetError.message;
     }
   } else {
@@ -863,7 +971,8 @@ app.post("/api/parse-html", (req, res) => {
 app.post("/api/save-queue", async (req, res) => {
   try {
     const queue = analyzeQueue(req.body?.queue || req.body || {});
-    const sheetResult = await postToGoogleScript("saveQueueSnapshot", queue);
+    const limitedQueueForSheet = buildLimitedQueueForSheet(queue, "manual-save-queue");
+    const sheetResult = await postToGoogleScript("saveQueueSnapshot", limitedQueueForSheet);
 
     res.json({
       ok: true,
@@ -885,8 +994,11 @@ app.listen(PORT, () => {
   if (AUTO_MONITOR_ENABLED) {
     startMonitor();
 
-    runMonitorOnce("server-startup").catch((err) => {
-      console.error("Startup monitor failed:", err.message);
-    });
+    console.log(
+      `Automatic monitor started. First scheduled run will happen in ${Math.max(
+        15,
+        POLL_INTERVAL_SECONDS
+      )} seconds.`
+    );
   }
 });
