@@ -1935,3 +1935,83 @@ tr:hover td {
     width: 100%;
   }
 }
+
+/* Countdown loader inside top dashboard cards */
+.stat-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.stat-countdown {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.34);
+}
+
+.stat-countdown-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.stat-card .stat-countdown-label {
+  display: inline-flex;
+  align-items: center;
+  color: rgba(203, 213, 225, 0.88);
+  font-size: 0.68rem;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.stat-countdown strong {
+  color: #f8fafc;
+  font-size: 0.72rem;
+  font-weight: 950;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.stat-countdown-track {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.12);
+}
+
+.stat-countdown-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.35), rgba(56, 189, 248, 0.95));
+  transition: width 300ms ease;
+}
+
+.stat-countdown.is-loading {
+  border-color: rgba(56, 189, 248, 0.3);
+  background: rgba(14, 165, 233, 0.08);
+}
+
+.stat-countdown.is-loading .stat-countdown-track i {
+  width: 100% !important;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.15), rgba(56, 189, 248, 0.95), rgba(56, 189, 248, 0.15));
+  animation: statLoadingSweep 1.1s linear infinite;
+}
+
+@keyframes statLoadingSweep {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(100%);
+  }
+}

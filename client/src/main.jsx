@@ -25,6 +25,14 @@ const GOOGLE_SHEET_DATABASE_URL =
 
 const AUTO_REFRESH_SECONDS = Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 60);
 
+function formatCountdown(seconds) {
+  const total = Math.max(0, Number(seconds || 0));
+  const minutes = Math.floor(total / 60);
+  const remainingSeconds = total % 60;
+
+  return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
 function safeNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -371,10 +379,16 @@ function StatCard({
   warning,
   tip,
   onClick,
+  loading = false,
+  countdown = AUTO_REFRESH_SECONDS,
+  refreshSeconds = AUTO_REFRESH_SECONDS,
   className = "",
 }) {
   const shouldElectricAlert =
     String(label || "").toLowerCase() === "auto-flag agents" && Number(value) > 0;
+  const safeRefreshSeconds = Math.max(1, Number(refreshSeconds || AUTO_REFRESH_SECONDS));
+  const safeCountdown = Math.max(0, Math.min(safeRefreshSeconds, Number(countdown || 0)));
+  const progressPercent = Math.max(0, Math.min(100, (safeCountdown / safeRefreshSeconds) * 100));
 
   return (
     <button
@@ -395,6 +409,16 @@ function StatCard({
       <p>{label}</p>
       <h2>{value}</h2>
       <span>{sub}</span>
+
+      <div className={`stat-countdown ${loading ? "is-loading" : ""}`}>
+        <div className="stat-countdown-row">
+          <span className="stat-countdown-label">{loading ? "Loading data" : "Next refresh"}</span>
+          <strong>{formatCountdown(safeCountdown)}</strong>
+        </div>
+        <div className="stat-countdown-track" aria-hidden="true">
+          <i style={{ width: `${progressPercent}%` }} />
+        </div>
+      </div>
     </button>
   );
 }
@@ -588,6 +612,8 @@ function App() {
   const [dashboard, setDashboard] = useState(null);
   const [monitor, setMonitor] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshCountdown, setRefreshCountdown] = useState(AUTO_REFRESH_SECONDS);
   const [lastLoaded, setLastLoaded] = useState("");
   const [error, setError] = useState("");
   const [flaggedModalOpen, setFlaggedModalOpen] = useState(false);
@@ -595,6 +621,7 @@ function App() {
 
   async function loadDashboard() {
     try {
+      setRefreshing(true);
       setError("");
 
       const [dashboardRes, monitorRes] = await Promise.allSettled([
@@ -624,6 +651,8 @@ function App() {
       setError("Watchtower server is waking up. Retrying automatically...");
     } finally {
       setLoading(false);
+      setRefreshing(false);
+      setRefreshCountdown(AUTO_REFRESH_SECONDS);
     }
   }
 
@@ -634,7 +663,17 @@ function App() {
       loadDashboard();
     }, AUTO_REFRESH_SECONDS * 1000);
 
-    return () => clearInterval(interval);
+    const countdownInterval = setInterval(() => {
+      setRefreshCountdown((current) => {
+        if (current <= 1) return AUTO_REFRESH_SECONDS;
+        return current - 1;
+      });
+    }, 1000);
+
+    return () => {
+      clearInterval(interval);
+      clearInterval(countdownInterval);
+    };
   }, []);
 
   const sheet = dashboard?.sheetDashboard || dashboard?.dashboard || {};
@@ -648,6 +687,7 @@ function App() {
   const scoreAverages = sheet.scoreAverages || [];
   const vendorMetrics = sheet.vendorMetrics || [];
   const liveRows = live.rows || [];
+  const cardsAreLoading = loading || refreshing;
   const liveAgentMetrics = live.agentMetrics || [];
 
   const activeWatchlist = useMemo(() => {
@@ -1212,6 +1252,9 @@ function App() {
           danger={summary.callsOnHold >= 25}
           onClick={() => setStatDetail(statDetails.callsOnHold)}
           tip="Shows how many customers are waiting. High volume means staffing, scheduling, or availability may need attention."
+          loading={cardsAreLoading}
+          countdown={refreshCountdown}
+          refreshSeconds={AUTO_REFRESH_SECONDS}
         />
 
         <StatCard
@@ -1222,6 +1265,9 @@ function App() {
           danger={summary.agentsAvailable === 0 && summary.callsOnHold > 0}
           onClick={() => setStatDetail(statDetails.agentsAvailable)}
           tip="Shows whether agents are available while calls are waiting. 0 available with calls on hold is a major coverage gap."
+          loading={cardsAreLoading}
+          countdown={refreshCountdown}
+          refreshSeconds={AUTO_REFRESH_SECONDS}
         />
 
         <StatCard
@@ -1232,6 +1278,9 @@ function App() {
           warning={summary.pastCallback > 0}
           onClick={() => setStatDetail(statDetails.pastCallback)}
           tip="Calls over 500 seconds are at callback-risk. These are priority calls for operational review."
+          loading={cardsAreLoading}
+          countdown={refreshCountdown}
+          refreshSeconds={AUTO_REFRESH_SECONDS}
         />
 
         <StatCard
@@ -1242,6 +1291,9 @@ function App() {
           warning={flaggedAgents.length > 0}
           onClick={() => setStatDetail(statDetails.autoFlagged)}
           tip="Click this card to understand the auto-flag count, then open the detailed flagged-agent list from the popup."
+          loading={cardsAreLoading}
+          countdown={refreshCountdown}
+          refreshSeconds={AUTO_REFRESH_SECONDS}
         />
 
         <StatCard
@@ -1252,17 +1304,13 @@ function App() {
           warning={unassignedHighRiskRows.length > 0}
           onClick={() => setStatDetail(statDetails.unassignedRisk)}
           tip="These are high or critical queue rows where Watchtower could not find an agent name, so they cannot be auto-saved as agent flags yet."
+          loading={cardsAreLoading}
+          countdown={refreshCountdown}
+          refreshSeconds={AUTO_REFRESH_SECONDS}
         />
       </section>
 
-   <div className="free-tier-load-note">
-  <AlertTriangle size={18} />
-  <span>
-    <strong>Server note:</strong>{" "}
-    because Watchtower is hosted on a free-tier server, the dashboard can take up to
-    1 minute to fully load and display the 200+ agents flagged by this tool.
-  </span>
-</div>
+  
 
       <section className="story-command-center">
         <div className="story-header">
