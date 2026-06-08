@@ -1335,11 +1335,11 @@ function App() {
         <div className="error-banner">Google Sheet error: {sheet.error}</div>
       ) : null}
 
-      <div className="sheet-load-banner">
-        {loading
-          ? "Loading Watchtower data from Google Sheets and live queue..."
-          : `Loaded todayâ€™s critical agents, average scores, and snapshot evidence from Google Sheets. Last update: ${lastLoaded} Â· Watchlist: ${activeWatchlist.length} Â· Daily Critical: ${dailyCritical.length} Â· Live Metrics: ${liveAgentMetrics.length} Â· Flagged Agents: ${flaggedAgents.length}`}
-      </div>
+    <div className="sheet-load-banner">
+  {loading
+    ? "Loading Watchtower data from Google Sheets and live queue..."
+    : `Loaded today's critical agents, average scores, and snapshot evidence from Google Sheets. Last update: ${lastLoaded} | Watchlist: ${activeWatchlist.length} | Daily Critical: ${dailyCritical.length} | Live Metrics: ${liveAgentMetrics.length} | Flagged Agents: ${flaggedAgents.length}`}
+</div>
 
       <section className="stats-grid">
         <StatCard
