@@ -2123,3 +2123,54 @@ tr:hover td {
     grid-template-columns: 1fr;
   }
 }
+.stat-detail-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 22px;
+}
+
+.stat-detail-action-btn {
+  min-width: 260px;
+  min-height: 58px;
+  padding: 16px 26px;
+  border: 0;
+  border-radius: 18px;
+  color: #0f172a;
+  background: linear-gradient(135deg, #facc15, #f59e0b, #fb923c);
+  font-size: 0.95rem;
+  font-weight: 950;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  box-shadow:
+    0 18px 38px rgba(245, 158, 11, 0.42),
+    0 0 26px rgba(250, 204, 21, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    filter 160ms ease;
+}
+
+.stat-detail-action-btn:hover {
+  transform: translateY(-3px) scale(1.03);
+  filter: brightness(1.08);
+  box-shadow:
+    0 24px 48px rgba(245, 158, 11, 0.58),
+    0 0 42px rgba(250, 204, 21, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.42);
+}
+
+.stat-detail-action-btn:active {
+  transform: translateY(0) scale(0.99);
+}
+
+@media (max-width: 760px) {
+  .stat-detail-footer {
+    justify-content: stretch;
+  }
+
+  .stat-detail-action-btn {
+    width: 100%;
+    min-width: 0;
+  }
+}
