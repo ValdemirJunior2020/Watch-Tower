@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+﻿import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   AlertTriangle,
@@ -8,6 +8,7 @@ import {
   ExternalLink,
   Eye,
   HelpCircle,
+  PhoneCall,
   Radio,
   ShieldAlert,
   UserCheck,
@@ -38,7 +39,7 @@ function safeNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function formatValue(value, fallback = "—") {
+function formatValue(value, fallback = "â€”") {
   if (value === undefined || value === null || value === "") return fallback;
   return value;
 }
@@ -76,7 +77,7 @@ function riskClass(value) {
   return "risk-neutral";
 }
 
-function snapshotValue(snapshot, key, fallback = "—") {
+function snapshotValue(snapshot, key, fallback = "â€”") {
   const value = snapshot?.[key];
 
   if (value === undefined || value === null || value === "") {
@@ -87,7 +88,7 @@ function snapshotValue(snapshot, key, fallback = "—") {
 }
 
 function formatSnapshotDate(value) {
-  if (!value) return "—";
+  if (!value) return "â€”";
 
   const raw = String(value);
 
@@ -109,7 +110,7 @@ function formatSnapshotDate(value) {
 }
 
 function formatSnapshotTime(value) {
-  if (!value) return "—";
+  if (!value) return "â€”";
 
   const raw = String(value);
 
@@ -227,9 +228,9 @@ function normalizeFlaggedAgentFromWatchlist(item) {
       item["Coaching Action"] ||
       item.coachingAction ||
       "Review the call, confirm process adherence, and coach based on evidence.",
-    averageScore: item["Average Score"] || item.averageScore || "—",
-    callsSeen: item["Calls Seen Today"] || item.callsSeenToday || item.callsSeen || "—",
-    lastCallId: item["Last Queue Call ID"] || item.lastQueueCallId || item.lastCallId || "—",
+    averageScore: item["Average Score"] || item.averageScore || "â€”",
+    callsSeen: item["Calls Seen Today"] || item.callsSeenToday || item.callsSeen || "â€”",
+    lastCallId: item["Last Queue Call ID"] || item.lastQueueCallId || item.lastCallId || "â€”",
     source: item["Watchlist ID"] ? "Daily Critical" : "Watchlist",
   };
 }
@@ -262,9 +263,9 @@ function normalizeFlaggedAgentFromMetric(item) {
       : item.watchOut || item["Things To Watch Out"] || "",
     coachingAction:
       "Review the flagged call exposure, confirm why the call exceeded safe queue timing, and coach based on evidence.",
-    averageScore: item.avgScore || item["Average Score"] || "—",
-    callsSeen: item.callsSeen || item["Calls Seen"] || "—",
-    lastCallId: item.lastCallId || item["Last Queue Call ID"] || "—",
+    averageScore: item.avgScore || item["Average Score"] || "â€”",
+    callsSeen: item.callsSeen || item["Calls Seen"] || "â€”",
+    lastCallId: item.lastCallId || item["Last Queue Call ID"] || "â€”",
     source: "Live Agent Metrics",
   };
 }
@@ -278,7 +279,7 @@ function buildAgentFlagStory(dailyCritical, watchlist) {
       agentName: "No agent flagged yet",
       vendor: "No call center found",
       issue: "No agent issue has been saved yet.",
-      score: "—",
+      score: "â€”",
       text: "No agent was auto-flagged in the current dashboard data yet.",
     };
   }
@@ -333,7 +334,7 @@ function buildCoverageNeedStory(summary, snapshotStats, vendorMetrics) {
 
   if (topVendor?.Vendor && topVendor.Vendor !== "Unknown") {
     callCenterName = topVendor.Vendor;
-    callCenterMessage = `${topVendor.Vendor} is the strongest call-center signal in today’s saved vendor data.`;
+    callCenterMessage = `${topVendor.Vendor} is the strongest call-center signal in todayâ€™s saved vendor data.`;
   }
 
   let headline = "Coverage looks stable right now.";
@@ -358,6 +359,54 @@ function buildCoverageNeedStory(summary, snapshotStats, vendorMetrics) {
     headline,
     callCenterMessage,
     recommendation,
+  };
+}
+
+
+function buildCallbackExposureStory(summary, snapshotStats, todaySnapshots, recentSnapshots) {
+  const source = todaySnapshots.length ? todaySnapshots : recentSnapshots;
+
+  const callbackValues = source
+    .map((snapshot) => safeNumber(snapshot["Past Callback Limit"]))
+    .filter((value) => value > 0);
+
+  const currentCallbackRisk = safeNumber(summary.pastCallback);
+  const peakCallbackRisk = Math.max(currentCallbackRisk, ...callbackValues, 0);
+  const averageCallbackRisk = callbackValues.length
+    ? Math.round(callbackValues.reduce((total, value) => total + value, 0) / callbackValues.length)
+    : currentCallbackRisk;
+
+  const projectedFiveDays = averageCallbackRisk > 0 ? averageCallbackRisk * 5 : currentCallbackRisk * 5;
+  const projectedSevenDays = averageCallbackRisk > 0 ? averageCallbackRisk * 7 : currentCallbackRisk * 7;
+
+  let exposureLevel = "Low";
+  let headline = "Callback exposure is currently under control.";
+  let meaning =
+    "Callback exposure means calls have crossed the safe callback waiting window. These calls should be watched because they can create repeat contacts, escalations, and poor customer experience.";
+  let recommendedFix = "Continue monitoring callback-risk calls and queue coverage.";
+
+  if (currentCallbackRisk >= 25 || peakCallbackRisk >= 25) {
+    exposureLevel = "Critical";
+    headline = `${currentCallbackRisk} calls are currently past callback threshold. Peak saved exposure reached ${peakCallbackRisk}.`;
+    recommendedFix =
+      "Add available coverage immediately, prioritize callback-risk calls first, and ask vendors to confirm live queue support.";
+  } else if (currentCallbackRisk > 0 || averageCallbackRisk > 0) {
+    exposureLevel = "High";
+    headline = `${currentCallbackRisk} calls are currently past callback threshold. Recent average exposure is around ${averageCallbackRisk}.`;
+    recommendedFix =
+      "Prioritize the callback-risk calls first, then validate whether the wait time was caused by low live coverage, agent availability, vendor staffing, or schedule gaps. Once schedules are added, Watchtower can compare expected coverage vs actual queue coverage to identify the root cause more accurately.";
+  }
+
+  return {
+    currentCallbackRisk,
+    peakCallbackRisk,
+    averageCallbackRisk,
+    projectedFiveDays,
+    projectedSevenDays,
+    exposureLevel,
+    headline,
+    meaning,
+    recommendedFix,
   };
 }
 
@@ -926,6 +975,10 @@ function App() {
     return buildCoverageNeedStory(summary, snapshotStats, vendorMetrics);
   }, [summary, snapshotStats, vendorMetrics]);
 
+  const callbackExposure = useMemo(() => {
+    return buildCallbackExposureStory(summary, snapshotStats, todaySnapshots, recentSnapshots);
+  }, [summary, snapshotStats, todaySnapshots, recentSnapshots]);
+
   const statDetails = useMemo(() => {
     const callsOnHold = safeNumber(summary.callsOnHold);
     const agentsAvailable = safeNumber(summary.agentsAvailable);
@@ -936,7 +989,7 @@ function App() {
     const snapshotDate = formatSnapshotDate(snapshotValue(latestSnapshot, "Date"));
     const snapshotTime = formatSnapshotTime(snapshotValue(latestSnapshot, "Time"));
     const snapshotStamp =
-      snapshotDate === "—" && snapshotTime === "—"
+      snapshotDate === "â€”" && snapshotTime === "â€”"
         ? "No saved snapshot timestamp was loaded yet."
         : `Latest saved snapshot: ${snapshotDate} at ${snapshotTime}.`;
 
@@ -1079,6 +1132,50 @@ function App() {
           "Best leadership use: this card shows the customer-experience impact of low coverage or slow queue movement.",
       },
 
+      callbackExposure: {
+        eyebrow: "Callback exposure",
+        title: "Callback Exposure",
+        subtitle: "This exposes how many calls have crossed the safe callback waiting window and what could happen if coverage does not improve.",
+        valueLabel: "Current callback-risk calls",
+        value: callbackExposure.currentCallbackRisk,
+        status:
+          callbackExposure.exposureLevel === "Critical"
+            ? "Critical callback exposure"
+            : callbackExposure.exposureLevel === "High"
+              ? "Callback risk active"
+              : "Callback exposure controlled",
+        statusClass:
+          callbackExposure.exposureLevel === "Critical"
+            ? "risk-critical"
+            : callbackExposure.exposureLevel === "High"
+              ? "risk-high"
+              : "risk-low",
+        meaning: callbackExposure.meaning,
+        evidence: [
+          `${callbackExposure.currentCallbackRisk} calls are currently past callback threshold.`,
+          `Peak callback exposure in loaded snapshots: ${callbackExposure.peakCallbackRisk}.`,
+          `Recent average callback exposure: ${callbackExposure.averageCallbackRisk}.`,
+          `Projected 5-day exposure if the pattern continues: ${callbackExposure.projectedFiveDays}.`,
+          `Projected 7-day exposure if the pattern continues: ${callbackExposure.projectedSevenDays}.`,
+          snapshotStamp,
+        ],
+        actions:
+          callbackExposure.currentCallbackRisk > 0
+            ? [
+                "Prioritize callback-risk calls before random QA review.",
+                "Validate whether the callback exposure is caused by low coverage, unavailable agents, or peak call volume.",
+                "Use the snapshot time to ask vendors for live coverage confirmation.",
+                "Once schedules are available, compare expected coverage vs actual queue coverage during the callback spike.",
+              ]
+            : [
+                "Continue monitoring callback exposure by snapshot time.",
+                "Use the forecast as an early warning before callbacks become repeat contacts.",
+                "Add schedules later so Watchtower can show whether the root cause is staffing, adherence, or volume.",
+              ],
+        footerNote:
+          "Best leadership use: this card turns callback risk into a prevention view instead of only reacting after customers have already waited too long.",
+      },
+
       autoFlagged: {
         eyebrow: "Agent coaching priority",
         title: "Auto-Flag Agents",
@@ -1158,6 +1255,7 @@ function App() {
     summary,
     snapshotStats,
     latestSnapshot,
+    callbackExposure,
     flaggedAgents,
     unassignedHighRiskRows.length,
     dailyCritical.length,
@@ -1240,7 +1338,7 @@ function App() {
       <div className="sheet-load-banner">
         {loading
           ? "Loading Watchtower data from Google Sheets and live queue..."
-          : `Loaded today’s critical agents, average scores, and snapshot evidence from Google Sheets. Last update: ${lastLoaded} · Watchlist: ${activeWatchlist.length} · Daily Critical: ${dailyCritical.length} · Live Metrics: ${liveAgentMetrics.length} · Flagged Agents: ${flaggedAgents.length}`}
+          : `Loaded todayâ€™s critical agents, average scores, and snapshot evidence from Google Sheets. Last update: ${lastLoaded} Â· Watchlist: ${activeWatchlist.length} Â· Daily Critical: ${dailyCritical.length} Â· Live Metrics: ${liveAgentMetrics.length} Â· Flagged Agents: ${flaggedAgents.length}`}
       </div>
 
       <section className="stats-grid">
@@ -1278,6 +1376,20 @@ function App() {
           warning={summary.pastCallback > 0}
           onClick={() => setStatDetail(statDetails.pastCallback)}
           tip="Calls over 500 seconds are at callback-risk. These are priority calls for operational review."
+          loading={cardsAreLoading}
+          countdown={refreshCountdown}
+          refreshSeconds={AUTO_REFRESH_SECONDS}
+        />
+
+        <StatCard
+          icon={<PhoneCall size={22} />}
+          label="Callback Exposure"
+          value={callbackExposure.currentCallbackRisk}
+          sub={`Peak saved: ${callbackExposure.peakCallbackRisk}`}
+          danger={callbackExposure.exposureLevel === "Critical"}
+          warning={callbackExposure.exposureLevel === "High"}
+          onClick={() => setStatDetail(statDetails.callbackExposure)}
+          tip="Shows current callback-risk calls, peak saved exposure, recent average, and a simple 5-day/7-day projection if the pattern continues."
           loading={cardsAreLoading}
           countdown={refreshCountdown}
           refreshSeconds={AUTO_REFRESH_SECONDS}
@@ -1393,6 +1505,51 @@ function App() {
               <strong>{coverageNeedStory.pastCallback}</strong>
               <small>Calls already past callback threshold.</small>
             </div>
+          </div>
+        </div>
+
+        <div className="callback-exposure-card">
+          <div>
+            <span>Callback exposure</span>
+            <h3>{callbackExposure.headline}</h3>
+            <p>{callbackExposure.meaning}</p>
+          </div>
+
+          <div className="callback-exposure-details">
+            <div>
+              <span>Current Risk</span>
+              <strong>{callbackExposure.currentCallbackRisk}</strong>
+              <small>Calls currently past callback threshold.</small>
+            </div>
+
+            <div>
+              <span>Peak Saved</span>
+              <strong>{callbackExposure.peakCallbackRisk}</strong>
+              <small>Highest callback exposure found in loaded snapshots.</small>
+            </div>
+
+            <div>
+              <span>Recent Average</span>
+              <strong>{callbackExposure.averageCallbackRisk}</strong>
+              <small>Average callback exposure from saved snapshots.</small>
+            </div>
+
+            <div>
+              <span>5-Day Projection</span>
+              <strong>{callbackExposure.projectedFiveDays}</strong>
+              <small>Potential callback-risk calls if the pattern continues.</small>
+            </div>
+
+            <div>
+              <span>7-Day Projection</span>
+              <strong>{callbackExposure.projectedSevenDays}</strong>
+              <small>Potential callback-risk calls if the pattern continues.</small>
+            </div>
+          </div>
+
+          <div className="callback-fix-box">
+            <span>Recommended fix</span>
+            <p>{callbackExposure.recommendedFix}</p>
           </div>
         </div>
 
@@ -1635,7 +1792,7 @@ function App() {
                   <div>
                     <strong>{formatValue(agent["Agent Name"])}</strong>
                     <span>
-                      {formatValue(agent.Vendor)} · {formatValue(agent["Calls Seen"])} calls
+                      {formatValue(agent.Vendor)} Â· {formatValue(agent["Calls Seen"])} calls
                     </span>
                   </div>
 
@@ -1719,7 +1876,7 @@ function App() {
                   <div>
                     <strong>{formatValue(item["Agent Name"])}</strong>
                     <span>
-                      {formatValue(item.Vendor)} · {formatValue(item["Issue Type"])}
+                      {formatValue(item.Vendor)} Â· {formatValue(item["Issue Type"])}
                     </span>
                   </div>
 
@@ -1839,7 +1996,7 @@ function App() {
       </section>
 
       <footer className="footer">
-        Watchtower · QA & Utilization Intelligence · Automatic monitoring every{" "}
+        Watchtower Â· QA & Utilization Intelligence Â· Automatic monitoring every{" "}
         {AUTO_REFRESH_SECONDS} seconds
       </footer>
 
