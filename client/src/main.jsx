@@ -35,6 +35,17 @@ function formatValue(value, fallback = "—") {
   return value;
 }
 
+function severityWeight(value) {
+  const severity = String(value || "").toLowerCase();
+
+  if (severity === "critical") return 4;
+  if (severity === "high") return 3;
+  if (severity === "medium") return 2;
+  if (severity === "low") return 1;
+
+  return 0;
+}
+
 function severityClass(value) {
   const sev = String(value || "").toLowerCase();
 
@@ -211,7 +222,7 @@ function normalizeFlaggedAgentFromWatchlist(item) {
     averageScore: item["Average Score"] || item.averageScore || "—",
     callsSeen: item["Calls Seen Today"] || item.callsSeenToday || item.callsSeen || "—",
     lastCallId: item["Last Queue Call ID"] || item.lastQueueCallId || item.lastCallId || "—",
-    source: "Watchlist",
+    source: item["Watchlist ID"] ? "Daily Critical" : "Watchlist",
   };
 }
 
@@ -221,12 +232,12 @@ function normalizeFlaggedAgentFromMetric(item) {
     agentName: item.agent || item["Agent Name"] || "Unknown Agent",
     vendor: item.vendor || item.Vendor || "Unknown",
     issue:
-      safeNumber(item.callbackRiskCalls) > 0
+      safeNumber(item.callbackRiskCalls || item["Callback Risk Calls"]) > 0
         ? "Long Wait / Callback Risk"
-        : safeNumber(item.highFlags) > 0
-        ? "High Queue Risk"
-        : safeNumber(item.criticalFlags) > 0
+        : safeNumber(item.criticalFlags || item["Critical Flags"]) > 0
         ? "Critical Queue Risk"
+        : safeNumber(item.highFlags || item["High Flags"]) > 0
+        ? "High Queue Risk"
         : "Automatic Queue Watch",
     severity: item.severity || item.Severity || "High",
     status: "Live Monitoring",
@@ -266,26 +277,10 @@ function buildAgentFlagStory(dailyCritical, watchlist) {
 
   const agent = source[0];
 
-  const agentName =
-    agent["Agent Name"] ||
-    agent.agentName ||
-    agent.agent ||
-    "Unknown Agent";
-
-  const vendor =
-    agent.Vendor ||
-    agent.vendor ||
-    "Unknown";
-
-  const issue =
-    agent["Issue Type"] ||
-    agent.issueType ||
-    "queue risk";
-
-  const score =
-    agent["Average Score"] ||
-    agent.averageScore ||
-    "not available";
+  const agentName = agent["Agent Name"] || agent.agentName || agent.agent || "Unknown Agent";
+  const vendor = agent.Vendor || agent.vendor || "Unknown";
+  const issue = agent["Issue Type"] || agent.issueType || "queue risk";
+  const score = agent["Average Score"] || agent.averageScore || "not available";
 
   const callCenterText =
     vendor === "Unknown"
@@ -367,13 +362,28 @@ function InfoTip({ text }) {
   );
 }
 
-function StatCard({ icon, label, value, sub, danger, warning, tip, onClick }) {
+function StatCard({
+  icon,
+  label,
+  value,
+  sub,
+  danger,
+  warning,
+  tip,
+  onClick,
+  className = "",
+}) {
+  const shouldElectricAlert =
+    String(label || "").toLowerCase() === "auto-flag agents" && Number(value) > 0;
+
   return (
     <button
       type="button"
       className={`stat-card stat-card-button ${danger ? "danger-card" : ""} ${
         warning ? "warning-card" : ""
-      } ${onClick ? "clickable-stat-card" : ""}`}
+      } ${onClick ? "clickable-stat-card" : ""} ${
+        shouldElectricAlert ? "auto-flag-alert" : ""
+      } ${className}`}
       onClick={onClick}
       disabled={!onClick}
     >
@@ -399,6 +409,78 @@ function EmptyState({ title, text }) {
   );
 }
 
+
+function StatDetailModal({ detail, onClose, onPrimaryAction }) {
+  if (!detail) return null;
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="stat-detail-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${detail.title} details`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="stat-detail-header">
+          <div>
+            <span>{detail.eyebrow || "Metric details"}</span>
+            <h2>{detail.title}</h2>
+            <p>{detail.subtitle}</p>
+          </div>
+
+          <button type="button" className="modal-close-btn" onClick={onClose}>
+            <X size={22} />
+          </button>
+        </div>
+
+        <div className="stat-detail-hero-row">
+          <div className="stat-detail-big-number">
+            <span>{detail.valueLabel}</span>
+            <strong>{detail.value}</strong>
+            <small className={detail.statusClass || "risk-neutral"}>{detail.status}</small>
+          </div>
+
+          <div className="stat-detail-meaning">
+            <span>What this means</span>
+            <p>{detail.meaning}</p>
+          </div>
+        </div>
+
+        <div className="stat-detail-grid">
+          <div className="stat-detail-block">
+            <span>Evidence Watchtower is using</span>
+            <ul>
+              {(detail.evidence || []).map((item, index) => (
+                <li key={`evidence-${index}`}>{item}</li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="stat-detail-block action-block">
+            <span>What to do next</span>
+            <ul>
+              {(detail.actions || []).map((item, index) => (
+                <li key={`action-${index}`}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        {detail.footerNote ? <div className="stat-detail-note">{detail.footerNote}</div> : null}
+
+        {detail.primaryActionLabel ? (
+          <div className="stat-detail-footer">
+            <button type="button" className="stat-detail-action-btn" onClick={onPrimaryAction}>
+              {detail.primaryActionLabel}
+            </button>
+          </div>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
 function FlaggedAgentsModal({ open, onClose, agents }) {
   if (!open) return null;
 
@@ -416,8 +498,8 @@ function FlaggedAgentsModal({ open, onClose, agents }) {
             <span>Auto-flagged agents</span>
             <h2>Agents Watchtower says need review now</h2>
             <p>
-              These agents were flagged from the saved watchlist or live agent metrics.
-              Review the evidence before coaching.
+              These agents were flagged from the saved watchlist, daily critical records,
+              or live agent metrics. Review the evidence before coaching.
             </p>
           </div>
 
@@ -431,7 +513,7 @@ function FlaggedAgentsModal({ open, onClose, agents }) {
             <Eye size={34} />
             <h3>No flagged agents found yet.</h3>
             <p>
-              The dashboard shows queue risk, but no agent-level flagged records are available
+              The dashboard may show queue risk, but no agent-level flagged records are available
               in the current response yet. Let the monitor save one more snapshot or check the
               Agent Watchlist tab.
             </p>
@@ -509,6 +591,7 @@ function App() {
   const [lastLoaded, setLastLoaded] = useState("");
   const [error, setError] = useState("");
   const [flaggedModalOpen, setFlaggedModalOpen] = useState(false);
+  const [statDetail, setStatDetail] = useState(null);
 
   async function loadDashboard() {
     try {
@@ -567,6 +650,61 @@ function App() {
   const liveRows = live.rows || [];
   const liveAgentMetrics = live.agentMetrics || [];
 
+  const activeWatchlist = useMemo(() => {
+    return watchlist.filter((item) => {
+      return String(item.Status || item.status || "").toLowerCase() !== "resolved";
+    });
+  }, [watchlist]);
+
+  const flaggedAgents = useMemo(() => {
+    const fromDailyCritical = dailyCritical.map(normalizeFlaggedAgentFromWatchlist);
+    const fromWatchlist = activeWatchlist.map(normalizeFlaggedAgentFromWatchlist);
+
+    const fromLiveMetrics = liveAgentMetrics
+      .filter((agent) => {
+        const severity = String(agent.severity || agent.Severity || "").toLowerCase();
+        return severity === "critical" || severity === "high";
+      })
+      .map(normalizeFlaggedAgentFromMetric);
+
+    const combined = [...fromDailyCritical, ...fromWatchlist, ...fromLiveMetrics];
+
+    const deduped = new Map();
+
+    combined.forEach((agent) => {
+      const key = `${String(agent.agentName).toLowerCase()}|${String(agent.vendor).toLowerCase()}`;
+
+      if (!deduped.has(key)) {
+        deduped.set(key, agent);
+        return;
+      }
+
+      const current = deduped.get(key);
+      const currentWeight = severityWeight(current.severity);
+      const nextWeight = severityWeight(agent.severity);
+
+      if (nextWeight > currentWeight || agent.source === "Watchlist") {
+        deduped.set(key, agent);
+      }
+    });
+
+    return Array.from(deduped.values()).sort((a, b) => {
+      return (
+        severityWeight(b.severity) - severityWeight(a.severity) ||
+        String(a.agentName).localeCompare(String(b.agentName))
+      );
+    });
+  }, [dailyCritical, activeWatchlist, liveAgentMetrics]);
+
+  const unassignedHighRiskRows = useMemo(() => {
+    return liveRows.filter((row) => {
+      const severity = String(row.severity || row.Severity || "").toLowerCase();
+      const agent = String(row.agent || row["Agent Name"] || "").trim();
+
+      return !agent && (severity === "critical" || severity === "high");
+    });
+  }, [liveRows]);
+
   const summary = useMemo(() => {
     const callsOnHold =
       safeNumber(live?.summary?.callsOnHold) ||
@@ -583,12 +721,6 @@ function App() {
       safeNumber(latestSnapshot["Past Callback Limit"]) ||
       safeNumber(latestSnapshot.pastCallback);
 
-    const autoFlagged =
-      safeNumber(live?.summary?.autoFlaggedAgents) ||
-      safeNumber(latestSnapshot["Auto Flagged Agents"]) ||
-      safeNumber(latestSnapshot.autoFlaggedAgents) ||
-      watchlist.filter((item) => String(item.Status || "").toLowerCase() !== "resolved").length;
-
     const companyRisk =
       live?.summary?.companyRisk ||
       latestSnapshot["Company Risk Level"] ||
@@ -599,50 +731,11 @@ function App() {
       callsOnHold,
       agentsAvailable,
       pastCallback,
-      autoFlagged,
+      autoFlagged: flaggedAgents.length,
+      unassignedRisk: unassignedHighRiskRows.length,
       companyRisk,
     };
-  }, [live, latestSnapshot, watchlist]);
-
-  const flaggedAgents = useMemo(() => {
-    const fromDailyCritical = dailyCritical.map(normalizeFlaggedAgentFromWatchlist);
-    const fromWatchlist = watchlist.map(normalizeFlaggedAgentFromWatchlist);
-
-    const fromLiveMetrics = liveAgentMetrics
-      .filter((agent) => ["Critical", "High"].includes(String(agent.severity || agent.Severity)))
-      .map(normalizeFlaggedAgentFromMetric);
-
-    const combined = [...fromDailyCritical, ...fromWatchlist, ...fromLiveMetrics];
-
-    const deduped = new Map();
-
-    combined.forEach((agent) => {
-      const key = `${String(agent.agentName).toLowerCase()}|${String(agent.vendor).toLowerCase()}`;
-
-      if (!deduped.has(key)) {
-        deduped.set(key, agent);
-        return;
-      }
-
-      const current = deduped.get(key);
-      const currentWeight = safeNumber(
-        current.severity === "Critical" ? 4 : current.severity === "High" ? 3 : 1
-      );
-      const nextWeight = safeNumber(
-        agent.severity === "Critical" ? 4 : agent.severity === "High" ? 3 : 1
-      );
-
-      if (nextWeight > currentWeight || agent.source === "Watchlist") {
-        deduped.set(key, agent);
-      }
-    });
-
-    return Array.from(deduped.values()).sort((a, b) => {
-      const aw = a.severity === "Critical" ? 4 : a.severity === "High" ? 3 : 1;
-      const bw = b.severity === "Critical" ? 4 : b.severity === "High" ? 3 : 1;
-      return bw - aw || String(a.agentName).localeCompare(String(b.agentName));
-    });
-  }, [dailyCritical, watchlist, liveAgentMetrics]);
+  }, [live, latestSnapshot, flaggedAgents.length, unassignedHighRiskRows.length]);
 
   const snapshotStats = useMemo(() => {
     const source = todaySnapshots.length ? todaySnapshots : recentSnapshots;
@@ -683,7 +776,8 @@ function App() {
     const callsOnHold = safeNumber(summary.callsOnHold);
     const agentsAvailable = safeNumber(summary.agentsAvailable);
     const pastCallback = safeNumber(summary.pastCallback);
-    const autoFlagged = safeNumber(summary.autoFlagged);
+    const autoFlagged = flaggedAgents.length;
+    const unassignedRisk = unassignedHighRiskRows.length;
 
     const repeatedZeroCoverage = snapshotStats.zeroAvailableCount;
     const repeatedCriticalHigh = snapshotStats.criticalCount + snapshotStats.highCount;
@@ -708,9 +802,13 @@ function App() {
 
       actions.push("Contact vendor/team leads and request live coverage confirmation.");
       actions.push("Ask each vendor how many agents are actively covering the queue right now.");
-      actions.push("Use this snapshot as evidence to request the schedule/roster data needed for exact schedule adherence tracking.");
+      actions.push(
+        "Use this snapshot as evidence to request the schedule/roster data needed for exact schedule adherence tracking."
+      );
       actions.push("Prioritize callback-risk calls before random QA review.");
-      actions.push("Validate agent status from the live tools: available, on call, unavailable, break, lunch, or not logged in.");
+      actions.push(
+        "Validate agent status from the live tools: available, on call, unavailable, break, lunch, or not logged in."
+      );
     } else if (callsOnHold >= 25) {
       level = "High";
       headline = "High queue pressure: calls waiting are above safe level.";
@@ -720,19 +818,30 @@ function App() {
 
       actions.push("Ask vendors to confirm live coverage and increase available agents if possible.");
       actions.push("Watch callback threshold closely.");
-      actions.push("Request roster/schedule data so Watchtower can compare expected coverage vs actual coverage.");
+      actions.push(
+        "Request roster/schedule data so Watchtower can compare expected coverage vs actual coverage."
+      );
     }
 
     if (pastCallback > 0) {
       if (level !== "Critical") level = "High";
 
-      actions.push(`Review the ${pastCallback} callback-risk calls first because they are already outside the safe waiting window.`);
+      actions.push(
+        `Review the ${pastCallback} callback-risk calls first because they are already outside the safe waiting window.`
+      );
       leadershipMessage.push(`${pastCallback} calls are already past callback threshold.`);
     }
 
     if (autoFlagged > 0) {
       actions.push(`Review the ${autoFlagged} auto-flagged agents before random QA sampling.`);
       leadershipMessage.push(`${autoFlagged} agents were auto-flagged for coaching review.`);
+    }
+
+    if (unassignedRisk > 0) {
+      actions.push(
+        `Review the ${unassignedRisk} unassigned high-risk queue rows because they could not be tied to a specific agent.`
+      );
+      leadershipMessage.push(`${unassignedRisk} high-risk rows had no agent name attached.`);
     }
 
     if (repeatedZeroCoverage > 0) {
@@ -767,15 +876,255 @@ function App() {
       actions,
       leadershipMessage,
     };
-  }, [summary, snapshotStats]);
+  }, [summary, snapshotStats, flaggedAgents.length, unassignedHighRiskRows.length]);
 
   const agentFlagStory = useMemo(() => {
-    return buildAgentFlagStory(dailyCritical, watchlist);
-  }, [dailyCritical, watchlist]);
+    return buildAgentFlagStory(dailyCritical, activeWatchlist);
+  }, [dailyCritical, activeWatchlist]);
 
   const coverageNeedStory = useMemo(() => {
     return buildCoverageNeedStory(summary, snapshotStats, vendorMetrics);
   }, [summary, snapshotStats, vendorMetrics]);
+
+  const statDetails = useMemo(() => {
+    const callsOnHold = safeNumber(summary.callsOnHold);
+    const agentsAvailable = safeNumber(summary.agentsAvailable);
+    const pastCallback = safeNumber(summary.pastCallback);
+    const autoFlagged = flaggedAgents.length;
+    const unassignedRisk = unassignedHighRiskRows.length;
+    const agentsNeeded = estimateAgentsNeeded(callsOnHold, agentsAvailable);
+    const snapshotDate = formatSnapshotDate(snapshotValue(latestSnapshot, "Date"));
+    const snapshotTime = formatSnapshotTime(snapshotValue(latestSnapshot, "Time"));
+    const snapshotStamp =
+      snapshotDate === "—" && snapshotTime === "—"
+        ? "No saved snapshot timestamp was loaded yet."
+        : `Latest saved snapshot: ${snapshotDate} at ${snapshotTime}.`;
+
+    const queueStatus =
+      callsOnHold > 0 && agentsAvailable === 0
+        ? "Critical coverage gap"
+        : callsOnHold >= 25
+          ? "High queue pressure"
+          : callsOnHold > 0
+            ? "Active queue pressure"
+            : "No live hold pressure";
+
+    const queueStatusClass =
+      callsOnHold > 0 && agentsAvailable === 0
+        ? "risk-critical"
+        : callsOnHold >= 25
+          ? "risk-high"
+          : callsOnHold > 0
+            ? "risk-medium"
+            : "risk-low";
+
+    const callbackStatus =
+      pastCallback > 0 ? "Callback-risk calls found" : "No callback-risk calls showing";
+
+    const flaggedPreview = flaggedAgents.slice(0, 5).map((agent) => {
+      return `${agent.agentName} (${agent.vendor}, ${agent.severity})`;
+    });
+
+    return {
+      callsOnHold: {
+        eyebrow: "Live queue pressure",
+        title: "Calls On Hold",
+        subtitle: "This tells leadership how much customer demand is waiting right now.",
+        valueLabel: "Current calls waiting",
+        value: callsOnHold,
+        status: queueStatus,
+        statusClass: queueStatusClass,
+        meaning:
+          callsOnHold > 0
+            ? "Customers are waiting in the queue. If available coverage is low, this becomes a staffing/utilization problem before it becomes a QA problem."
+            : "The live queue is not showing hold pressure right now. Keep watching the saved snapshots for repeated spikes.",
+        evidence: [
+          `${callsOnHold} calls are currently on hold.`,
+          `${agentsAvailable} agents are currently available.`,
+          agentsNeeded > 0
+            ? `Estimated extra agents needed right now: ${agentsNeeded}.`
+            : "No extra-agent estimate was triggered by the current queue count.",
+          snapshotStamp,
+          `Peak calls on hold in loaded snapshots: ${snapshotStats.maxCallsOnHold}.`,
+        ],
+        actions:
+          callsOnHold > 0
+            ? [
+                "Confirm which vendors have agents actually available, not only scheduled.",
+                "Check whether agents are on break, lunch, unavailable, or logged out while calls are waiting.",
+                "Use this metric with schedule adherence to prove utilization gaps.",
+                "If calls are building, review callback-risk calls before random QA sampling.",
+              ]
+            : [
+                "Keep monitoring every snapshot for spikes.",
+                "Use historical snapshots to find which times of day usually create queue pressure.",
+                "Compare queue pressure against vendor schedules once the roster data is available.",
+              ],
+        footerNote:
+          "Best leadership use: this card helps prove whether the operation had enough live coverage when customers were waiting.",
+      },
+
+      agentsAvailable: {
+        eyebrow: "Coverage / utilization",
+        title: "Agents Available",
+        subtitle: "This shows whether the queue had agents ready to receive calls.",
+        valueLabel: "Available agents",
+        value: agentsAvailable,
+        status:
+          agentsAvailable === 0 && callsOnHold > 0
+            ? "Critical: 0 available while calls wait"
+            : agentsAvailable === 0
+              ? "0 available showing"
+              : "Coverage showing available",
+        statusClass:
+          agentsAvailable === 0 && callsOnHold > 0
+            ? "risk-critical"
+            : agentsAvailable === 0
+              ? "risk-high"
+              : "risk-low",
+        meaning:
+          agentsAvailable === 0 && callsOnHold > 0
+            ? "This is the strongest utilization warning: customers are waiting, but the live queue shows no available agents."
+            : "Available agents are the coverage side of the story. This should be compared against schedules, breaks, lunches, and actual login status.",
+        evidence: [
+          `${agentsAvailable} agents are available now.`,
+          `${callsOnHold} calls are on hold now.`,
+          `${snapshotStats.zeroAvailableCount} loaded snapshots showed calls waiting with 0 agents available.`,
+          `Critical/high saved snapshots loaded: ${snapshotStats.criticalCount + snapshotStats.highCount}.`,
+          snapshotStamp,
+        ],
+        actions: [
+          "Ask each vendor/team lead to confirm who is logged in and available right now.",
+          "Compare available agents against the expected schedule, breaks, and lunches.",
+          "When calls are waiting with 0 available, capture this as utilization evidence.",
+          "Use the queue snapshot time to audit agent status in the vendor roster or WFM sheet.",
+        ],
+        footerNote:
+          "Best leadership use: this card connects queue failure to schedule adherence and agent availability.",
+      },
+
+      pastCallback: {
+        eyebrow: "Callback risk",
+        title: "Past Callback",
+        subtitle: "This identifies calls that have crossed the unsafe waiting threshold.",
+        valueLabel: "Calls past 500 seconds",
+        value: pastCallback,
+        status: callbackStatus,
+        statusClass: pastCallback > 0 ? "risk-high" : "risk-low",
+        meaning:
+          pastCallback > 0
+            ? "These calls are already past the callback-risk threshold. They should be reviewed before random QA because they can create repeat contacts, escalations, and poor customer experience."
+            : "No callback-risk calls are showing right now. Keep watching because this can change quickly when coverage drops.",
+        evidence: [
+          `${pastCallback} calls are currently past the 500-second callback threshold.`,
+          `Peak callback-risk calls in loaded snapshots: ${snapshotStats.maxPastCallback}.`,
+          `${callsOnHold} calls are on hold now.`,
+          `${agentsAvailable} agents are available now.`,
+          snapshotStamp,
+        ],
+        actions:
+          pastCallback > 0
+            ? [
+                "Review callback-risk calls first.",
+                "Check whether the wait was caused by low coverage, unavailable agents, or high volume.",
+                "Use these calls as coaching and staffing evidence, not just QA score evidence.",
+                "Confirm if these calls created repeat contacts later.",
+              ]
+            : [
+                "Continue monitoring the callback threshold.",
+                "Watch for repeated near-threshold calls during peak windows.",
+                "Use this with Calls On Hold and Agents Available to tell the full queue story.",
+              ],
+        footerNote:
+          "Best leadership use: this card shows the customer-experience impact of low coverage or slow queue movement.",
+      },
+
+      autoFlagged: {
+        eyebrow: "Agent coaching priority",
+        title: "Auto-Flag Agents",
+        subtitle: "This shows how many agents Watchtower marked for coaching review from sheets and live metrics.",
+        valueLabel: "Flagged agents",
+        value: autoFlagged,
+        status: autoFlagged > 0 ? "Agent review needed" : "No flagged agents loaded",
+        statusClass: autoFlagged > 0 ? "risk-high" : "risk-low",
+        meaning:
+          autoFlagged > 0
+            ? "These are the agents the system says should be reviewed before random sampling because they have score risk, queue risk, or repeated watchlist evidence."
+            : "No flagged agents were loaded in the current dashboard response. Let the monitor save another snapshot or check the Google Sheet tabs.",
+        evidence: [
+          `${autoFlagged} unique agents are flagged after deduping Daily Critical, Watchlist, and Live Metrics.`,
+          `${dailyCritical.length} Daily Critical records loaded.`,
+          `${activeWatchlist.length} active Watchlist records loaded.`,
+          `${liveAgentMetrics.length} live agent metrics loaded.`,
+          flaggedPreview.length
+            ? `First flagged agents: ${flaggedPreview.join(" | ")}.`
+            : "No flagged-agent names are available in the current response.",
+        ],
+        actions:
+          autoFlagged > 0
+            ? [
+                "Open the flagged agent list and review Critical agents first.",
+                "Listen to those calls before random QA sampling.",
+                "Validate the evidence column before coaching the agent.",
+                "Separate agent behavior issues from staffing/coverage issues.",
+              ]
+            : [
+                "Let the monitor run another snapshot.",
+                "Check whether Google Sheets returned Daily Critical and Watchlist rows.",
+                "Confirm the Apps Script dashboard action is returning agent records.",
+              ],
+        primaryActionLabel: autoFlagged > 0 ? "Open flagged agent list" : "Open flagged agent list anyway",
+        primaryAction: "flaggedAgents",
+        footerNote:
+          "Best leadership use: this card tells you exactly where to start coaching instead of guessing.",
+      },
+
+      unassignedRisk: {
+        eyebrow: "Data quality risk",
+        title: "Unassigned Risk",
+        subtitle: "This catches high-risk queue rows that could not be tied to a named agent.",
+        valueLabel: "High-risk rows without agent",
+        value: unassignedRisk,
+        status: unassignedRisk > 0 ? "Needs data review" : "No unassigned risk showing",
+        statusClass: unassignedRisk > 0 ? "risk-high" : "risk-low",
+        meaning:
+          unassignedRisk > 0
+            ? "The queue has high-risk rows, but Watchtower cannot attach them to a specific agent. That means the issue is visible, but the coaching owner is not."
+            : "High-risk rows are currently linked to agent names or no high-risk unassigned rows are showing.",
+        evidence: [
+          `${unassignedRisk} high/critical live queue rows have no agent name.`,
+          `${liveRows.length} live rows were loaded from the queue response.`,
+          `${flaggedAgents.length} named agents were still flagged successfully.`,
+          snapshotStamp,
+        ],
+        actions:
+          unassignedRisk > 0
+            ? [
+                "Review the live queue row details and confirm why the agent name is missing.",
+                "Check whether the source page changed its HTML/table structure.",
+                "Improve the scraper mapping so the agent field is captured every time.",
+                "Do not coach an agent from this row until the owner is identified.",
+              ]
+            : [
+                "Keep monitoring for source-page changes.",
+                "Confirm new queue snapshots still include agent names.",
+                "Use named flagged agents for coaching priority.",
+              ],
+        footerNote:
+          "Best leadership use: this card protects you from blaming the wrong agent when the queue row did not expose ownership.",
+      },
+    };
+  }, [
+    summary,
+    snapshotStats,
+    latestSnapshot,
+    flaggedAgents,
+    unassignedHighRiskRows.length,
+    dailyCritical.length,
+    activeWatchlist.length,
+    liveAgentMetrics.length,
+    liveRows.length,
+  ]);
 
   return (
     <main className="app-shell">
@@ -844,10 +1193,14 @@ function App() {
 
       {error ? <div className="error-banner">{error}</div> : null}
 
+      {sheet.error ? (
+        <div className="error-banner">Google Sheet error: {sheet.error}</div>
+      ) : null}
+
       <div className="sheet-load-banner">
         {loading
           ? "Loading Watchtower data from Google Sheets and live queue..."
-          : `Loaded today’s critical agents, average scores, and snapshot evidence from Google Sheets. Last update: ${lastLoaded}`}
+          : `Loaded today’s critical agents, average scores, and snapshot evidence from Google Sheets. Last update: ${lastLoaded} · Watchlist: ${activeWatchlist.length} · Daily Critical: ${dailyCritical.length} · Live Metrics: ${liveAgentMetrics.length} · Flagged Agents: ${flaggedAgents.length}`}
       </div>
 
       <section className="stats-grid">
@@ -855,8 +1208,9 @@ function App() {
           icon={<Users size={22} />}
           label="Calls On Hold"
           value={summary.callsOnHold}
-          sub="Live queue pressure"
+          sub="Click for queue details"
           danger={summary.callsOnHold >= 25}
+          onClick={() => setStatDetail(statDetails.callsOnHold)}
           tip="Shows how many customers are waiting. High volume means staffing, scheduling, or availability may need attention."
         />
 
@@ -864,8 +1218,9 @@ function App() {
           icon={<UserCheck size={22} />}
           label="Agents Available"
           value={summary.agentsAvailable}
-          sub={summary.agentsAvailable === 0 ? "0 available is critical" : "Available to take calls"}
+          sub={summary.agentsAvailable === 0 ? "Click: 0 available is critical" : "Click for coverage details"}
           danger={summary.agentsAvailable === 0 && summary.callsOnHold > 0}
+          onClick={() => setStatDetail(statDetails.agentsAvailable)}
           tip="Shows whether agents are available while calls are waiting. 0 available with calls on hold is a major coverage gap."
         />
 
@@ -873,21 +1228,41 @@ function App() {
           icon={<Clock size={22} />}
           label="Past Callback"
           value={summary.pastCallback}
-          sub="500+ seconds"
+          sub="Click for 500+ sec details"
           warning={summary.pastCallback > 0}
+          onClick={() => setStatDetail(statDetails.pastCallback)}
           tip="Calls over 500 seconds are at callback-risk. These are priority calls for operational review."
         />
 
         <StatCard
           icon={<ShieldAlert size={22} />}
           label="Auto-Flag Agents"
-          value={summary.autoFlagged}
-          sub="Click to see flagged agents"
-          warning={summary.autoFlagged > 0}
-          onClick={() => setFlaggedModalOpen(true)}
-          tip="Click this card to see which agents were auto-flagged, why they were flagged, and what to review first."
+          value={flaggedAgents.length}
+          sub="Click for agent-risk details"
+          warning={flaggedAgents.length > 0}
+          onClick={() => setStatDetail(statDetails.autoFlagged)}
+          tip="Click this card to understand the auto-flag count, then open the detailed flagged-agent list from the popup."
+        />
+
+        <StatCard
+          icon={<AlertTriangle size={22} />}
+          label="Unassigned Risk"
+          value={unassignedHighRiskRows.length}
+          sub="Click for missing-agent details"
+          warning={unassignedHighRiskRows.length > 0}
+          onClick={() => setStatDetail(statDetails.unassignedRisk)}
+          tip="These are high or critical queue rows where Watchtower could not find an agent name, so they cannot be auto-saved as agent flags yet."
         />
       </section>
+
+   <div className="free-tier-load-note">
+  <AlertTriangle size={18} />
+  <span>
+    <strong>Server note:</strong>{" "}
+    because Watchtower is hosted on a free-tier server, the dashboard can take up to
+    1 minute to fully load and display the 200+ agents flagged by this tool.
+  </span>
+</div>
 
       <section className="story-command-center">
         <div className="story-header">
@@ -898,8 +1273,8 @@ function App() {
               <InfoTip text="This section turns queue data into plain-English story cards so a new QA or manager can understand the issue without decoding raw numbers." />
             </h2>
             <p>
-              Watchtower converts every snapshot into a readable operations story: time, queue pressure,
-              callback risk, staffing need, and coaching priority.
+              Watchtower converts every snapshot into a readable operations story: time, queue
+              pressure, callback risk, staffing need, and coaching priority.
             </p>
           </div>
 
@@ -1279,14 +1654,14 @@ function App() {
             </h2>
           </div>
 
-          {watchlist.length === 0 ? (
+          {activeWatchlist.length === 0 ? (
             <EmptyState
               title="No active watchlist items."
               text="Agents will appear here when the system auto-saves or when you add them manually."
             />
           ) : (
             <div className="watchlist-stack">
-              {watchlist.slice(0, 8).map((item, index) => (
+              {activeWatchlist.slice(0, 8).map((item, index) => (
                 <button
                   type="button"
                   className="watch-card watch-card-clickable"
@@ -1324,22 +1699,34 @@ function App() {
         <div className="value-grid">
           <div>
             <strong>Agent Risk</strong>
-            <p>Shows agents with low average scores, long call exposure, callback risk, or repeated daily flags.</p>
+            <p>
+              Shows agents with low average scores, long call exposure, callback risk, or repeated
+              daily flags.
+            </p>
           </div>
 
           <div>
             <strong>Queue Failure</strong>
-            <p>Exposes when calls are waiting while no agents are available, which creates customer experience risk.</p>
+            <p>
+              Exposes when calls are waiting while no agents are available, which creates customer
+              experience risk.
+            </p>
           </div>
 
           <div>
             <strong>Vendor Coverage</strong>
-            <p>Highlights whether WNS, TEP, Buwelo, Concentrix, Telus, or other vendors are creating coverage gaps.</p>
+            <p>
+              Highlights whether WNS, TEP, Buwelo, Concentrix, Telus, or other vendors are creating
+              coverage gaps.
+            </p>
           </div>
 
           <div>
             <strong>Coaching Priority</strong>
-            <p>Creates a daily list of agents to review first so QA work is targeted and evidence-based.</p>
+            <p>
+              Creates a daily list of agents to review first so QA work is targeted and
+              evidence-based.
+            </p>
           </div>
         </div>
       </section>
@@ -1391,7 +1778,9 @@ function App() {
                       </span>
                     </td>
                     <td className="evidence-cell">
-                      {Array.isArray(row.reasons) ? row.reasons.join(" | ") : formatValue(row.reasons)}
+                      {Array.isArray(row.reasons)
+                        ? row.reasons.join(" | ")
+                        : formatValue(row.reasons)}
                     </td>
                   </tr>
                 ))}
@@ -1402,8 +1791,20 @@ function App() {
       </section>
 
       <footer className="footer">
-        Watchtower · QA & Utilization Intelligence · Automatic monitoring every {AUTO_REFRESH_SECONDS} seconds
+        Watchtower · QA & Utilization Intelligence · Automatic monitoring every{" "}
+        {AUTO_REFRESH_SECONDS} seconds
       </footer>
+
+      <StatDetailModal
+        detail={statDetail}
+        onClose={() => setStatDetail(null)}
+        onPrimaryAction={() => {
+          if (statDetail?.primaryAction === "flaggedAgents") {
+            setStatDetail(null);
+            setFlaggedModalOpen(true);
+          }
+        }}
+      />
 
       <FlaggedAgentsModal
         open={flaggedModalOpen}

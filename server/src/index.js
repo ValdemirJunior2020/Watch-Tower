@@ -36,6 +36,16 @@ const MIN_SCORE_HIGH = Number(
 
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 
+// Hotfix: the old code aborted Google dashboard reads after exactly 12s.
+// Keep the live HotelPlanner fetch tight, but allow Sheets a little more time
+// and cache the last good dashboard so the React app still opens.
+const HP_QUEUE_TIMEOUT_MS = Number(process.env.HP_QUEUE_TIMEOUT_MS || 12000);
+const GOOGLE_DASHBOARD_TIMEOUT_MS = Number(
+  process.env.GOOGLE_DASHBOARD_TIMEOUT_MS || 30000
+);
+const GOOGLE_POST_TIMEOUT_MS = Number(process.env.GOOGLE_POST_TIMEOUT_MS || 60000);
+const SHEET_DASHBOARD_CACHE_MS = Number(process.env.SHEET_DASHBOARD_CACHE_MS || 60000);
+
 app.use(
   cors({
     origin:
@@ -53,6 +63,8 @@ let lastMonitorResult = null;
 let lastLiveQueue = null;
 let monitorRunCount = 0;
 let monitorErrors = [];
+let lastSheetDashboard = null;
+let lastSheetDashboardAt = 0;
 
 function nowIso() {
   return new Date().toISOString();
@@ -560,7 +572,7 @@ async function readResponseOnceAsJson(response) {
 
 async function fetchQueue() {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const timeout = setTimeout(() => controller.abort(), HP_QUEUE_TIMEOUT_MS);
 
   try {
     const response = await fetch(HP_QUEUE_URL, {
@@ -590,7 +602,7 @@ async function fetchQueue() {
     return queue;
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new Error("HotelPlanner queue fetch timed out after 12 seconds.");
+      throw new Error(`HotelPlanner queue fetch timed out after ${Math.round(HP_QUEUE_TIMEOUT_MS / 1000)} seconds.`);
     }
 
     throw error;
@@ -605,7 +617,7 @@ async function googleScriptGet(action) {
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const timeout = setTimeout(() => controller.abort(), GOOGLE_DASHBOARD_TIMEOUT_MS);
 
   try {
     const url = new URL(GOOGLE_SCRIPT_URL);
@@ -631,7 +643,7 @@ async function googleScriptGet(action) {
     return data;
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new Error("Google Apps Script dashboard fetch timed out after 12 seconds.");
+      throw new Error(`Google Apps Script dashboard fetch timed out after ${Math.round(GOOGLE_DASHBOARD_TIMEOUT_MS / 1000)} seconds.`);
     }
 
     throw error;
@@ -646,7 +658,7 @@ async function postToGoogleScript(action, payload) {
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000);
+  const timeout = setTimeout(() => controller.abort(), GOOGLE_POST_TIMEOUT_MS);
 
   try {
     const response = await fetch(GOOGLE_SCRIPT_URL, {
@@ -671,7 +683,7 @@ async function postToGoogleScript(action, payload) {
     return data;
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new Error("Google Apps Script POST timed out after 45 seconds.");
+      throw new Error(`Google Apps Script POST timed out after ${Math.round(GOOGLE_POST_TIMEOUT_MS / 1000)} seconds.`);
     }
 
     throw error;
@@ -932,24 +944,7 @@ app.get("/api/live-queue", async (_, res) => {
 });
 
 app.get("/api/dashboard", async (_, res) => {
-  let liveQueue = lastLiveQueue;
-
-  try {
-    liveQueue = await fetchQueue();
-  } catch (liveError) {
-    console.error("Live queue fetch failed:", liveError.message);
-
-    if (!liveQueue) {
-      liveQueue = buildEmptyLiveQueue(liveError.message);
-    } else {
-      liveQueue = {
-        ...liveQueue,
-        warning: liveError.message,
-      };
-    }
-  }
-
-  let sheetDashboard = {
+  const emptySheetDashboard = {
     latestSnapshot: null,
     recentSnapshots: [],
     todaySnapshots: [],
@@ -959,16 +954,57 @@ app.get("/api/dashboard", async (_, res) => {
     vendorMetrics: [],
   };
 
-  if (GOOGLE_SCRIPT_URL) {
-    try {
-      const sheetData = await googleScriptGet("dashboard");
-      sheetDashboard = sheetData.dashboard || sheetData.sheetDashboard || sheetDashboard;
-    } catch (sheetError) {
-      console.error("Google Sheet dashboard fetch failed:", sheetError.message);
-      sheetDashboard.error = sheetError.message;
+  const livePromise = fetchQueue()
+    .then((queue) => ({ ok: true, queue }))
+    .catch((error) => ({ ok: false, error }));
+
+  const shouldUseCachedSheet =
+    lastSheetDashboard && Date.now() - lastSheetDashboardAt < SHEET_DASHBOARD_CACHE_MS;
+
+  const sheetPromise = shouldUseCachedSheet
+    ? Promise.resolve({ ok: true, dashboard: lastSheetDashboard, cached: true })
+    : GOOGLE_SCRIPT_URL
+    ? googleScriptGet("dashboard")
+        .then((data) => ({
+          ok: true,
+          dashboard: data.dashboard || data.sheetDashboard || emptySheetDashboard,
+          cached: false,
+        }))
+        .catch((error) => ({ ok: false, error }))
+    : Promise.resolve({
+        ok: false,
+        error: new Error("Missing GOOGLE_SCRIPT_URL in server environment variables."),
+      });
+
+  const [liveResult, sheetResult] = await Promise.all([livePromise, sheetPromise]);
+
+  let liveQueue = lastLiveQueue;
+  if (liveResult.ok) {
+    liveQueue = liveResult.queue;
+  } else {
+    console.error("Live queue fetch failed:", liveResult.error.message);
+    liveQueue = liveQueue
+      ? { ...liveQueue, warning: liveResult.error.message }
+      : buildEmptyLiveQueue(liveResult.error.message);
+  }
+
+  let sheetDashboard = lastSheetDashboard || emptySheetDashboard;
+  if (sheetResult.ok) {
+    sheetDashboard = sheetResult.dashboard || emptySheetDashboard;
+    if (!sheetResult.cached) {
+      lastSheetDashboard = sheetDashboard;
+      lastSheetDashboardAt = Date.now();
+    }
+    if (sheetResult.cached) {
+      sheetDashboard = { ...sheetDashboard, cached: true };
     }
   } else {
-    sheetDashboard.error = "Missing GOOGLE_SCRIPT_URL in server environment variables.";
+    console.error("Google Sheet dashboard fetch failed:", sheetResult.error.message);
+    sheetDashboard = {
+      ...sheetDashboard,
+      error: sheetResult.error.message,
+      usedLastGoodCache: Boolean(lastSheetDashboard),
+    };
   }
 
   res.json({
