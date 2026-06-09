@@ -1,8 +1,9 @@
-﻿import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   AlertTriangle,
   BarChart3,
+  CalendarCheck,
   Clock,
   Database,
   ExternalLink,
@@ -22,7 +23,7 @@ const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:8080";
 
 const GOOGLE_SHEET_DATABASE_URL =
   import.meta.env.VITE_GOOGLE_SHEET_DATABASE_URL ||
-  "https://docs.google.com/spreadsheets/d/13IxCpTTyUXF-ssFI7PcSbO8xfsauJvkZkOPQcpETJc4/edit?gid=1129431701#gid=1129431701";
+  "https://docs.google.com/spreadsheets/d/1aOfpStv8ZApqvG5-cKuEKiKuVwO0u-DE_s2vgK83A8M/edit?usp=sharing";
 
 const AUTO_REFRESH_SECONDS = Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 60);
 
@@ -39,7 +40,7 @@ function safeNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function formatValue(value, fallback = "â€”") {
+function formatValue(value, fallback = "—") {
   if (value === undefined || value === null || value === "") return fallback;
   return value;
 }
@@ -77,7 +78,7 @@ function riskClass(value) {
   return "risk-neutral";
 }
 
-function snapshotValue(snapshot, key, fallback = "â€”") {
+function snapshotValue(snapshot, key, fallback = "—") {
   const value = snapshot?.[key];
 
   if (value === undefined || value === null || value === "") {
@@ -88,7 +89,7 @@ function snapshotValue(snapshot, key, fallback = "â€”") {
 }
 
 function formatSnapshotDate(value) {
-  if (!value) return "â€”";
+  if (!value) return "—";
 
   const raw = String(value);
 
@@ -110,7 +111,7 @@ function formatSnapshotDate(value) {
 }
 
 function formatSnapshotTime(value) {
-  if (!value) return "â€”";
+  if (!value) return "—";
 
   const raw = String(value);
 
@@ -228,9 +229,9 @@ function normalizeFlaggedAgentFromWatchlist(item) {
       item["Coaching Action"] ||
       item.coachingAction ||
       "Review the call, confirm process adherence, and coach based on evidence.",
-    averageScore: item["Average Score"] || item.averageScore || "â€”",
-    callsSeen: item["Calls Seen Today"] || item.callsSeenToday || item.callsSeen || "â€”",
-    lastCallId: item["Last Queue Call ID"] || item.lastQueueCallId || item.lastCallId || "â€”",
+    averageScore: item["Average Score"] || item.averageScore || "—",
+    callsSeen: item["Calls Seen Today"] || item.callsSeenToday || item.callsSeen || "—",
+    lastCallId: item["Last Queue Call ID"] || item.lastQueueCallId || item.lastCallId || "—",
     source: item["Watchlist ID"] ? "Daily Critical" : "Watchlist",
   };
 }
@@ -263,9 +264,9 @@ function normalizeFlaggedAgentFromMetric(item) {
       : item.watchOut || item["Things To Watch Out"] || "",
     coachingAction:
       "Review the flagged call exposure, confirm why the call exceeded safe queue timing, and coach based on evidence.",
-    averageScore: item.avgScore || item["Average Score"] || "â€”",
-    callsSeen: item.callsSeen || item["Calls Seen"] || "â€”",
-    lastCallId: item.lastCallId || item["Last Queue Call ID"] || "â€”",
+    averageScore: item.avgScore || item["Average Score"] || "—",
+    callsSeen: item.callsSeen || item["Calls Seen"] || "—",
+    lastCallId: item.lastCallId || item["Last Queue Call ID"] || "—",
     source: "Live Agent Metrics",
   };
 }
@@ -279,7 +280,7 @@ function buildAgentFlagStory(dailyCritical, watchlist) {
       agentName: "No agent flagged yet",
       vendor: "No call center found",
       issue: "No agent issue has been saved yet.",
-      score: "â€”",
+      score: "—",
       text: "No agent was auto-flagged in the current dashboard data yet.",
     };
   }
@@ -334,7 +335,7 @@ function buildCoverageNeedStory(summary, snapshotStats, vendorMetrics) {
 
   if (topVendor?.Vendor && topVendor.Vendor !== "Unknown") {
     callCenterName = topVendor.Vendor;
-    callCenterMessage = `${topVendor.Vendor} is the strongest call-center signal in todayâ€™s saved vendor data.`;
+    callCenterMessage = `${topVendor.Vendor} is the strongest call-center signal in today’s saved vendor data.`;
   }
 
   let headline = "Coverage looks stable right now.";
@@ -657,6 +658,719 @@ function FlaggedAgentsModal({ open, onClose, agents }) {
   );
 }
 
+
+function getScheduleMetric(source, camelKey, sheetKey) {
+  return safeNumber(source?.[camelKey] ?? source?.[sheetKey] ?? 0);
+}
+
+function scheduleField(row, sheetKey, camelKey, fallback = "") {
+  return row?.[sheetKey] ?? row?.[camelKey] ?? fallback;
+}
+
+function normalizeScheduleStatus(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function agentNameKey(name) {
+  let raw = String(name || "").toLowerCase().trim();
+
+  try {
+    raw = raw.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  } catch (err) {}
+
+  raw = raw.replace(/[^a-z0-9, ]+/g, " ").replace(/\s+/g, " ").trim();
+
+  if (raw.includes(",")) {
+    const parts = raw.split(",").map((part) => part.trim()).filter(Boolean);
+    if (parts.length >= 2) raw = `${parts.slice(1).join(" ")} ${parts[0]}`;
+  }
+
+  return raw.replace(/\s+/g, " ").trim();
+}
+
+function agentTokenKey(name) {
+  return agentNameKey(name)
+    .split(" ")
+    .filter((part) => part.length > 1)
+    .sort()
+    .join("|");
+}
+
+function buildVisibleAgentMap(liveRows = [], liveAgentMetrics = []) {
+  const exact = new Set();
+  const token = new Set();
+
+  function add(name) {
+    const raw = String(name || "").trim();
+    if (!raw) return;
+    const exactKey = agentNameKey(raw);
+    const tokenKey = agentTokenKey(raw);
+    if (exactKey) exact.add(exactKey);
+    if (tokenKey) token.add(tokenKey);
+  }
+
+  liveRows.forEach((row) => add(row.agent || row["Agent Name"]));
+  liveAgentMetrics.forEach((agent) => add(agent.agent || agent["Agent Name"]));
+
+  return { exact, token };
+}
+
+function isAgentVisibleInQueue(name, visibleMap) {
+  const exactKey = agentNameKey(name);
+  const tokenKey = agentTokenKey(name);
+  return Boolean(visibleMap.exact.has(exactKey) || visibleMap.token.has(tokenKey));
+}
+
+function parseTimeParts(timeText) {
+  const raw = String(timeText || "").trim();
+  const match = raw.match(/^(\d{1,2}):(\d{2})\s*([AP]M)?$/i);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const ampm = match[3] ? match[3].toUpperCase() : "";
+
+  if (ampm === "PM" && hour < 12) hour += 12;
+  if (ampm === "AM" && hour === 12) hour = 0;
+
+  return { hour, minute };
+}
+
+function dateTimeFromDateAndTime(dateKey, timeText) {
+  const parts = parseTimeParts(timeText);
+  if (!parts) return null;
+
+  const dateParts = String(dateKey || "").split("-").map(Number);
+  if (dateParts.length < 3 || dateParts.some((part) => Number.isNaN(part))) return null;
+
+  return new Date(dateParts[0], dateParts[1] - 1, dateParts[2], parts.hour, parts.minute, 0);
+}
+
+function isNowWithinWindow(dateKey, startText, endText, now = new Date(), graceMinutes = 0) {
+  const start = dateTimeFromDateAndTime(dateKey, startText);
+  const end = dateTimeFromDateAndTime(dateKey, endText);
+
+  if (!start || !end) return false;
+  if (end <= start) end.setDate(end.getDate() + 1);
+
+  const safeStart = new Date(start.getTime() + Number(graceMinutes || 0) * 60000);
+  return now >= safeStart && now <= end;
+}
+
+function getCurrentBreakWindow(schedule, now = new Date()) {
+  const dateKey = scheduleField(schedule, "Date", "date");
+  const windows = [
+    ["Break 1", scheduleField(schedule, "Break 1 Start", "break1Start"), scheduleField(schedule, "Break 1 End", "break1End")],
+    ["Lunch", scheduleField(schedule, "Lunch Start", "lunchStart"), scheduleField(schedule, "Lunch End", "lunchEnd")],
+    ["Break 2", scheduleField(schedule, "Break 2 Start", "break2Start"), scheduleField(schedule, "Break 2 End", "break2End")],
+  ];
+
+  for (const [label, startText, endText] of windows) {
+    if (!startText || !endText) continue;
+    if (isNowWithinWindow(dateKey, startText, endText, now, 0)) {
+      return `${label} ${startText} - ${endText}`;
+    }
+  }
+
+  return "";
+}
+
+function isScheduleRowWorkingNow(schedule, now = new Date()) {
+  const status = normalizeScheduleStatus(scheduleField(schedule, "Schedule Status", "scheduleStatus"));
+  if (status !== "scheduled") return false;
+
+  const dateKey = scheduleField(schedule, "Date", "date");
+  const start = scheduleField(schedule, "Scheduled Start", "scheduledStart");
+  const end = scheduleField(schedule, "Scheduled End", "scheduledEnd");
+
+  return isNowWithinWindow(dateKey, start, end, now, 10);
+}
+
+function buildScheduleCoverageFromImportedSchedules(schedulesToday, liveRows, liveAgentMetrics, now = new Date()) {
+  const visibleMap = buildVisibleAgentMap(liveRows, liveAgentMetrics);
+  const shouldBeWorkingAgents = [];
+  const exposedAgents = [];
+  const onBreakAgents = [];
+  const needsNameMapAgents = [];
+
+  (Array.isArray(schedulesToday) ? schedulesToday : []).forEach((schedule) => {
+    const vendor = scheduleField(schedule, "Vendor", "vendor", "Unknown");
+    const agentId = scheduleField(schedule, "Agent ID", "agentId", "");
+    const agentName = scheduleField(schedule, "Agent Name", "agentName", "");
+    const matchStatus = scheduleField(schedule, "Name Match Status", "nameMatchStatus", "Source Name");
+    const start = scheduleField(schedule, "Scheduled Start", "scheduledStart", "");
+    const end = scheduleField(schedule, "Scheduled End", "scheduledEnd", "");
+    const status = scheduleField(schedule, "Schedule Status", "scheduleStatus", "");
+
+    if (String(matchStatus).toLowerCase().includes("needs name map")) {
+      needsNameMapAgents.push({ vendor, agentId, agentName, start, end, status, matchStatus, source: schedule });
+    }
+
+    if (!isScheduleRowWorkingNow(schedule, now)) return;
+
+    const breakWindow = getCurrentBreakWindow(schedule, now);
+    if (breakWindow) {
+      onBreakAgents.push({ vendor, agentId, agentName, start, end, breakWindow, status, matchStatus, source: schedule });
+      return;
+    }
+
+    const seen = isAgentVisibleInQueue(agentName, visibleMap);
+    const item = {
+      vendor,
+      agentId,
+      agentName,
+      start,
+      end,
+      status,
+      seen,
+      matchStatus,
+      source: schedule,
+      evidence: seen
+        ? "Agent is scheduled now and was seen in the live queue snapshot."
+        : "Agent is scheduled now, not on break/lunch, and was not seen in the live queue snapshot.",
+    };
+
+    shouldBeWorkingAgents.push(item);
+    if (!seen) exposedAgents.push(item);
+  });
+
+  return {
+    shouldBeWorkingAgents,
+    exposedAgents,
+    onBreakAgents,
+    needsNameMapAgents,
+    scheduledNow: shouldBeWorkingAgents.length,
+    seenInQueue: shouldBeWorkingAgents.filter((agent) => agent.seen).length,
+    scheduledButNotSeen: exposedAgents.length,
+    onBreakLunch: onBreakAgents.length,
+    missingNameMap: needsNameMapAgents.length,
+  };
+}
+
+function isActiveScheduleFlag(flag) {
+  const resolved = String(flag?.Resolved || flag?.resolved || "No").toLowerCase();
+  if (resolved === "yes" || resolved === "resolved" || resolved === "true") return false;
+
+  const type = String(flag?.["Flag Type"] || flag?.flagType || "").toLowerCase();
+  return (
+    type.includes("scheduled but not seen") ||
+    type.includes("not scheduled but seen") ||
+    type.includes("off but seen")
+  );
+}
+
+function buildScheduleSummary(coverage, flags, schedulesToday, importedCoverage, livePressure) {
+  const activeFlags = (Array.isArray(flags) ? flags : []).filter(isActiveScheduleFlag);
+  const scheduledButNotSeenFlags = activeFlags.filter((flag) =>
+    String(flag["Flag Type"] || flag.flagType || "").toLowerCase().includes("scheduled but not seen")
+  ).length;
+  const offButSeenFlags = activeFlags.filter((flag) => {
+    const type = String(flag["Flag Type"] || flag.flagType || "").toLowerCase();
+    return type.includes("not scheduled but seen") || type.includes("off but seen");
+  }).length;
+
+  const scheduledNow = Math.max(
+    getScheduleMetric(coverage, "scheduledNow", "Scheduled Now"),
+    safeNumber(importedCoverage?.scheduledNow)
+  );
+  const seenInQueue = Math.max(
+    getScheduleMetric(coverage, "seenInQueue", "Seen In Queue"),
+    safeNumber(importedCoverage?.seenInQueue)
+  );
+  const scheduledButNotSeen = Math.max(
+    getScheduleMetric(coverage, "scheduledButNotSeen", "Scheduled But Not Seen"),
+    safeNumber(importedCoverage?.scheduledButNotSeen),
+    scheduledButNotSeenFlags
+  );
+  const onBreakLunch = Math.max(
+    getScheduleMetric(coverage, "onBreakLunch", "On Break/Lunch"),
+    safeNumber(importedCoverage?.onBreakLunch)
+  );
+  const offButSeen = Math.max(
+    getScheduleMetric(coverage, "offButSeen", "Off But Seen"),
+    offButSeenFlags
+  );
+  const missingNameMap = Math.max(
+    getScheduleMetric(coverage, "missingNameMap", "Missing Name Map"),
+    safeNumber(importedCoverage?.missingNameMap)
+  );
+  const riskCount = Math.max(activeFlags.length, scheduledButNotSeen + offButSeen);
+  const callsOnHold = safeNumber(livePressure?.callsOnHold);
+  const agentsAvailable = safeNumber(livePressure?.agentsAvailable);
+  const exposedPhoneAgents = importedCoverage?.exposedAgents || [];
+
+  return {
+    scheduledNow,
+    seenInQueue,
+    scheduledButNotSeen,
+    onBreakLunch,
+    offButSeen,
+    missingNameMap,
+    riskCount,
+    phoneCoverageRisk: callsOnHold > 0 && exposedPhoneAgents.length > 0 ? exposedPhoneAgents.length : riskCount,
+    callsOnHold,
+    agentsAvailable,
+    importedRowsToday: schedulesToday.length,
+    flagsToday: activeFlags.length,
+    activeFlags,
+    shouldBeWorkingAgents: importedCoverage?.shouldBeWorkingAgents || [],
+    exposedAgents: exposedPhoneAgents,
+    onBreakAgents: importedCoverage?.onBreakAgents || [],
+    needsNameMapAgents: importedCoverage?.needsNameMapAgents || [],
+    checkedAt: coverage?.checkedAt || coverage?.["Checked At"] || "",
+    snapshotId: coverage?.snapshotId || coverage?.["Snapshot ID"] || "",
+    vendors: Array.isArray(coverage?.vendors) ? coverage.vendors : [],
+  };
+}
+
+
+function ScheduleExposureModal({ detail, onClose }) {
+  if (!detail) return null;
+
+  const rows = Array.isArray(detail.rows) ? detail.rows : [];
+  const mode = detail.mode || "agents";
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="schedule-exposure-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${detail.title} details`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flagged-modal-header">
+          <div>
+            <span>{detail.eyebrow || "Schedule coverage"}</span>
+            <h2>{detail.title}</h2>
+            <p>{detail.subtitle}</p>
+          </div>
+
+          <button type="button" className="modal-close-btn" onClick={onClose}>
+            <X size={22} />
+          </button>
+        </div>
+
+        <div className="schedule-modal-summary-row">
+          <div>
+            <span>Total records</span>
+            <strong>{rows.length}</strong>
+          </div>
+          <div>
+            <span>Purpose</span>
+            <strong>{detail.purpose || "Investigation"}</strong>
+          </div>
+        </div>
+
+        {rows.length === 0 ? (
+          <div className="flagged-modal-empty">
+            <Eye size={34} />
+            <h3>No records found for this card.</h3>
+            <p>{detail.emptyText || "There is no saved data behind this schedule card yet."}</p>
+          </div>
+        ) : mode === "flags" ? (
+          <div className="table-wrap schedule-modal-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Checked</th>
+                  <th>Vendor</th>
+                  <th>Agent</th>
+                  <th>Agent ID</th>
+                  <th>Flag</th>
+                  <th>Expected</th>
+                  <th>Actual</th>
+                  <th>Schedule</th>
+                  <th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((flag, index) => (
+                  <tr key={`${flag["Snapshot ID"] || "snapshot"}-${flag["Agent ID"] || index}-${index}`}>
+                    <td>{formatSnapshotTime(flag["Checked At"] || flag.checkedAt)}</td>
+                    <td>{formatValue(flag.Vendor || flag.vendor)}</td>
+                    <td className="strong-cell">{formatValue(flag["Agent Name"] || flag.agentName)}</td>
+                    <td>{formatValue(flag["Agent ID"] || flag.agentId)}</td>
+                    <td>
+                      <span className={`severity-badge ${severityClass(flag.Severity || flag.severity)}`}>
+                        {formatValue(flag["Flag Type"] || flag.flagType)}
+                      </span>
+                    </td>
+                    <td>{formatValue(flag["Expected Status"] || flag.expectedStatus)}</td>
+                    <td>{formatValue(flag["Actual Status"] || flag.actualStatus)}</td>
+                    <td>
+                      {formatValue(flag["Scheduled Start"] || flag.scheduledStart)} - {formatValue(flag["Scheduled End"] || flag.scheduledEnd)}
+                    </td>
+                    <td className="evidence-cell">{formatValue(flag.Evidence || flag.evidence)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="table-wrap schedule-modal-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Vendor</th>
+                  <th>Agent</th>
+                  <th>Agent ID</th>
+                  <th>Scheduled</th>
+                  <th>Status</th>
+                  <th>Seen?</th>
+                  <th>Break/Lunch</th>
+                  <th>Match</th>
+                  <th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((agent, index) => (
+                  <tr key={`${agent.vendor}-${agent.agentId || agent.agentName}-${index}`}>
+                    <td>{formatValue(agent.vendor)}</td>
+                    <td className="strong-cell">{formatValue(agent.agentName)}</td>
+                    <td>{formatValue(agent.agentId)}</td>
+                    <td>{formatValue(agent.start)} - {formatValue(agent.end)}</td>
+                    <td>{formatValue(agent.status)}</td>
+                    <td>
+                      <span className={`severity-badge ${agent.seen ? "severity-low" : "severity-high"}`}>
+                        {agent.seen ? "Seen" : "Not Seen"}
+                      </span>
+                    </td>
+                    <td>{formatValue(agent.breakWindow)}</td>
+                    <td>{formatValue(agent.matchStatus)}</td>
+                    <td className="evidence-cell">{formatValue(agent.evidence)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function ScheduleAdherenceSection({ summary, flags }) {
+  const [scheduleDetail, setScheduleDetail] = useState(null);
+
+  const visibleFlags = Array.isArray(summary.activeFlags) ? summary.activeFlags.slice(0, 100) : [];
+  const exposedAgents = Array.isArray(summary.exposedAgents) ? summary.exposedAgents : [];
+  const shouldBeWorkingAgents = Array.isArray(summary.shouldBeWorkingAgents)
+    ? summary.shouldBeWorkingAgents
+    : [];
+  const seenAgents = shouldBeWorkingAgents.filter((agent) => agent.seen);
+  const onBreakAgents = Array.isArray(summary.onBreakAgents) ? summary.onBreakAgents : [];
+  const needsNameMapAgents = Array.isArray(summary.needsNameMapAgents)
+    ? summary.needsNameMapAgents
+    : [];
+
+  const scheduledButNotSeenFlags = visibleFlags.filter((flag) =>
+    String(flag["Flag Type"] || flag.flagType || "").toLowerCase().includes("scheduled but not seen")
+  );
+
+  const offButSeenFlags = visibleFlags.filter((flag) => {
+    const type = String(flag["Flag Type"] || flag.flagType || "").toLowerCase();
+    return type.includes("not scheduled but seen") || type.includes("off but seen");
+  });
+
+  const openAgentModal = (title, subtitle, rows, purpose, emptyText) => {
+    setScheduleDetail({
+      title,
+      subtitle,
+      rows,
+      purpose,
+      emptyText,
+      mode: "agents",
+    });
+  };
+
+  const openFlagModal = (title, subtitle, rows, purpose, emptyText) => {
+    setScheduleDetail({
+      title,
+      subtitle,
+      rows,
+      purpose,
+      emptyText,
+      mode: "flags",
+    });
+  };
+
+  return (
+    <section className="schedule-adherence-panel phone-exposure-panel">
+      <div className="section-heading">
+        <div>
+          <span className="eyebrow">Schedule Adherence</span>
+          <h2>Agents who should be taking calls right now</h2>
+          <p>
+            This section exposes the scheduled Voice / Customer Service agents who should be covering
+            the phone queue now. When calls are waiting, the priority list is the agents scheduled now
+            but not seen in the queue snapshot.
+          </p>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        className="phone-exposure-alert phone-exposure-alert-button"
+        onClick={() =>
+          openAgentModal(
+            "Current phone exposure: scheduled agents not seen",
+            "These are the agents scheduled right now who were not seen in the current queue snapshot. Use this list to validate login/availability with vendor leads.",
+            exposedAgents,
+            "Immediate coverage validation",
+            "No scheduled-and-missing agents are detected for the current time. Check the schedule date/time, timezone, and name mapping if this looks wrong."
+          )
+        }
+      >
+        <div>
+          <span>Current phone exposure</span>
+          <strong>{summary.callsOnHold} calls on hold · {summary.agentsAvailable} agents available</strong>
+          <p>
+            {exposedAgents.length > 0
+              ? `${exposedAgents.length} scheduled agents are not seen in the queue snapshot. Click to expose the agent list.`
+              : "No scheduled-and-missing phone coverage agents are detected from the imported schedules right now. Click to inspect the backing list."}
+          </p>
+        </div>
+      </button>
+
+      <div className="schedule-kpi-grid phone-schedule-kpi-grid">
+        <button
+          type="button"
+          className="schedule-kpi-tile"
+          onClick={() =>
+            openAgentModal(
+              "Agents who should be taking calls now",
+              "All imported June Voice / Customer Service schedule rows currently inside the shift window and not inside break/lunch.",
+              shouldBeWorkingAgents,
+              "Expected phone coverage",
+              "No scheduled agents are inside the current shift window. Check Agent Schedules, schedule date, and timezone."
+            )
+          }
+        >
+          <span>Should be taking calls</span>
+          <strong>{summary.scheduledNow}</strong>
+          <small>Click to expose</small>
+        </button>
+
+        <button
+          type="button"
+          className="schedule-kpi-tile"
+          onClick={() =>
+            openAgentModal(
+              "Scheduled agents seen in queue",
+              "These scheduled agents were visible in the live queue snapshot.",
+              seenAgents,
+              "Confirmed queue visibility",
+              "No scheduled agents were seen in the current queue snapshot."
+            )
+          }
+        >
+          <span>Seen in queue</span>
+          <strong>{summary.seenInQueue}</strong>
+          <small>Click to expose</small>
+        </button>
+
+        <button
+          type="button"
+          className={`schedule-kpi-tile ${summary.scheduledButNotSeen > 0 ? "schedule-risk-kpi" : ""}`}
+          onClick={() =>
+            openAgentModal(
+              "Scheduled agents not seen in queue",
+              "Priority list for vendor/team-lead validation when phones need coverage.",
+              exposedAgents,
+              "Coverage exposure",
+              "No scheduled agents are missing from the queue snapshot right now."
+            )
+          }
+        >
+          <span>Scheduled not seen</span>
+          <strong>{summary.scheduledButNotSeen}</strong>
+          <small>Click to expose</small>
+        </button>
+
+        <button
+          type="button"
+          className="schedule-kpi-tile"
+          onClick={() =>
+            openAgentModal(
+              "Agents inside break/lunch windows",
+              "These agents are scheduled now but currently fall inside imported break/lunch windows, so they should not be treated as missing without validation.",
+              onBreakAgents,
+              "Protected break/lunch",
+              "No imported break/lunch windows are active right now."
+            )
+          }
+        >
+          <span>On break/lunch</span>
+          <strong>{summary.onBreakLunch}</strong>
+          <small>Click to expose</small>
+        </button>
+
+        <button
+          type="button"
+          className={`schedule-kpi-tile ${summary.offButSeen > 0 ? "schedule-risk-kpi" : ""}`}
+          onClick={() =>
+            openFlagModal(
+              "Agents marked off/leave but seen in queue",
+              "These saved flags show agents whose imported schedule said Off/Leave, but the queue snapshot showed them active/visible.",
+              offButSeenFlags,
+              "Schedule mismatch",
+              "No off/leave-but-seen flags are saved for today."
+            )
+          }
+        >
+          <span>Off but seen</span>
+          <strong>{summary.offButSeen}</strong>
+          <small>Click to expose</small>
+        </button>
+
+        <button
+          type="button"
+          className={`schedule-kpi-tile ${summary.missingNameMap > 0 ? "schedule-warning-kpi" : ""}`}
+          onClick={() =>
+            openAgentModal(
+              "Schedule rows that need name mapping",
+              "These rows cannot be matched safely to the live queue because the schedule has an ID/code without a queue-matchable name. Buwelo EDS codes usually need this map.",
+              needsNameMapAgents,
+              "Fix name mapping",
+              "No schedule rows need name mapping right now."
+            )
+          }
+        >
+          <span>Needs name map</span>
+          <strong>{summary.missingNameMap}</strong>
+          <small>Click to expose</small>
+        </button>
+      </div>
+
+      {exposedAgents.length > 0 ? (
+        <div className="phone-exposure-list">
+          <div className="story-table-title">
+            <h3>Priority list: scheduled agents not seen while phones need coverage</h3>
+            <span>{exposedAgents.length} agents</span>
+          </div>
+          <div className="table-wrap schedule-flags-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Vendor</th>
+                  <th>Agent</th>
+                  <th>Agent ID</th>
+                  <th>Scheduled</th>
+                  <th>Status</th>
+                  <th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {exposedAgents.slice(0, 100).map((agent, index) => (
+                  <tr key={`${agent.vendor}-${agent.agentId || agent.agentName}-${index}`}>
+                    <td>{formatValue(agent.vendor)}</td>
+                    <td className="strong-cell">{formatValue(agent.agentName)}</td>
+                    <td>{formatValue(agent.agentId)}</td>
+                    <td>{formatValue(agent.start)} - {formatValue(agent.end)}</td>
+                    <td>
+                      <span className="severity-badge severity-high">Scheduled Not Seen</span>
+                    </td>
+                    <td className="evidence-cell">{agent.evidence}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : shouldBeWorkingAgents.length > 0 ? (
+        <div className="phone-exposure-list">
+          <div className="story-table-title">
+            <h3>Scheduled phone coverage seen now</h3>
+            <span>{shouldBeWorkingAgents.length} scheduled agents checked</span>
+          </div>
+          <div className="table-wrap schedule-flags-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Vendor</th>
+                  <th>Agent</th>
+                  <th>Agent ID</th>
+                  <th>Scheduled</th>
+                  <th>Seen?</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shouldBeWorkingAgents.slice(0, 60).map((agent, index) => (
+                  <tr key={`${agent.vendor}-${agent.agentId || agent.agentName}-${index}`}>
+                    <td>{formatValue(agent.vendor)}</td>
+                    <td className="strong-cell">{formatValue(agent.agentName)}</td>
+                    <td>{formatValue(agent.agentId)}</td>
+                    <td>{formatValue(agent.start)} - {formatValue(agent.end)}</td>
+                    <td>
+                      <span className={`severity-badge ${agent.seen ? "severity-low" : "severity-high"}`}>
+                        {agent.seen ? "Seen" : "Not Seen"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : (
+        <EmptyState
+          title="No scheduled phone agents found for the current time."
+          text="This can happen outside the imported shift windows, or when the schedule date/time does not match the live snapshot. Check Agent Schedules and the current timezone."
+        />
+      )}
+
+      {visibleFlags.length > 0 ? (
+        <div className="phone-exposure-list">
+          <div className="story-table-title">
+            <h3>All schedule adherence flags saved today</h3>
+            <span>{visibleFlags.length} flags</span>
+          </div>
+          <div className="table-wrap schedule-flags-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Checked</th>
+                  <th>Vendor</th>
+                  <th>Agent</th>
+                  <th>Flag</th>
+                  <th>Expected</th>
+                  <th>Actual</th>
+                  <th>Schedule</th>
+                  <th>Evidence</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {visibleFlags.map((flag, index) => (
+                  <tr key={`${flag["Snapshot ID"] || "snapshot"}-${flag["Agent ID"] || index}-${index}`}>
+                    <td>{formatSnapshotTime(flag["Checked At"] || flag.checkedAt)}</td>
+                    <td>{formatValue(flag.Vendor || flag.vendor)}</td>
+                    <td className="strong-cell">{formatValue(flag["Agent Name"] || flag.agentName)}</td>
+                    <td>
+                      <span className={`severity-badge ${severityClass(flag.Severity || flag.severity)}`}>
+                        {formatValue(flag["Flag Type"] || flag.flagType)}
+                      </span>
+                    </td>
+                    <td>{formatValue(flag["Expected Status"] || flag.expectedStatus)}</td>
+                    <td>{formatValue(flag["Actual Status"] || flag.actualStatus)}</td>
+                    <td>
+                      {formatValue(flag["Scheduled Start"] || flag.scheduledStart)} - {formatValue(flag["Scheduled End"] || flag.scheduledEnd)}
+                    </td>
+                    <td className="evidence-cell">{formatValue(flag.Evidence || flag.evidence)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+      <ScheduleExposureModal detail={scheduleDetail} onClose={() => setScheduleDetail(null)} />
+    </section>
+  );
+}
+
 function App() {
   const [dashboard, setDashboard] = useState(null);
   const [monitor, setMonitor] = useState(null);
@@ -735,9 +1449,41 @@ function App() {
   const watchlist = sheet.watchlist || [];
   const scoreAverages = sheet.scoreAverages || [];
   const vendorMetrics = sheet.vendorMetrics || [];
+  const scheduleFlagsToday = sheet.scheduleFlagsToday || [];
+  const scheduleCoverageLatest = sheet.scheduleCoverageLatest || {};
+  const schedulesToday = sheet.schedulesToday || [];
   const liveRows = live.rows || [];
   const cardsAreLoading = loading || refreshing;
   const liveAgentMetrics = live.agentMetrics || [];
+
+  const importedScheduleCoverage = useMemo(() => {
+    return buildScheduleCoverageFromImportedSchedules(
+      schedulesToday,
+      liveRows,
+      liveAgentMetrics,
+      new Date()
+    );
+  }, [schedulesToday, liveRows, liveAgentMetrics]);
+
+  const scheduleSummary = useMemo(() => {
+    const callsOnHold =
+      safeNumber(live?.summary?.callsOnHold) ||
+      safeNumber(latestSnapshot["Calls On Hold"]) ||
+      safeNumber(latestSnapshot.callsOnHold);
+
+    const agentsAvailable =
+      safeNumber(live?.summary?.agentsAvailable) ||
+      safeNumber(latestSnapshot["Agents Available"]) ||
+      safeNumber(latestSnapshot.agentsAvailable);
+
+    return buildScheduleSummary(
+      scheduleCoverageLatest,
+      scheduleFlagsToday,
+      schedulesToday,
+      importedScheduleCoverage,
+      { callsOnHold, agentsAvailable }
+    );
+  }, [scheduleCoverageLatest, scheduleFlagsToday, schedulesToday, importedScheduleCoverage, live, latestSnapshot]);
 
   const activeWatchlist = useMemo(() => {
     return watchlist.filter((item) => {
@@ -822,9 +1568,10 @@ function App() {
       pastCallback,
       autoFlagged: flaggedAgents.length,
       unassignedRisk: unassignedHighRiskRows.length,
+      scheduleRisk: scheduleSummary.riskCount,
       companyRisk,
     };
-  }, [live, latestSnapshot, flaggedAgents.length, unassignedHighRiskRows.length]);
+  }, [live, latestSnapshot, flaggedAgents.length, unassignedHighRiskRows.length, scheduleSummary.riskCount]);
 
   const snapshotStats = useMemo(() => {
     const source = todaySnapshots.length ? todaySnapshots : recentSnapshots;
@@ -867,6 +1614,7 @@ function App() {
     const pastCallback = safeNumber(summary.pastCallback);
     const autoFlagged = flaggedAgents.length;
     const unassignedRisk = unassignedHighRiskRows.length;
+    const scheduleRisk = scheduleSummary.riskCount;
 
     const repeatedZeroCoverage = snapshotStats.zeroAvailableCount;
     const repeatedCriticalHigh = snapshotStats.criticalCount + snapshotStats.highCount;
@@ -926,6 +1674,11 @@ function App() {
       leadershipMessage.push(`${autoFlagged} agents were auto-flagged for coaching review.`);
     }
 
+    if (scheduleRisk > 0) {
+      actions.push(`Review the ${scheduleRisk} schedule-adherence flags before assuming this is an agent QA issue.`);
+      leadershipMessage.push(`${scheduleRisk} schedule-adherence risk flags were found from the imported June schedules.`);
+    }
+
     if (unassignedRisk > 0) {
       actions.push(
         `Review the ${unassignedRisk} unassigned high-risk queue rows because they could not be tied to a specific agent.`
@@ -965,7 +1718,7 @@ function App() {
       actions,
       leadershipMessage,
     };
-  }, [summary, snapshotStats, flaggedAgents.length, unassignedHighRiskRows.length]);
+  }, [summary, snapshotStats, flaggedAgents.length, unassignedHighRiskRows.length, scheduleSummary.riskCount]);
 
   const agentFlagStory = useMemo(() => {
     return buildAgentFlagStory(dailyCritical, activeWatchlist);
@@ -989,7 +1742,7 @@ function App() {
     const snapshotDate = formatSnapshotDate(snapshotValue(latestSnapshot, "Date"));
     const snapshotTime = formatSnapshotTime(snapshotValue(latestSnapshot, "Time"));
     const snapshotStamp =
-      snapshotDate === "â€”" && snapshotTime === "â€”"
+      snapshotDate === "—" && snapshotTime === "—"
         ? "No saved snapshot timestamp was loaded yet."
         : `Latest saved snapshot: ${snapshotDate} at ${snapshotTime}.`;
 
@@ -1216,6 +1969,49 @@ function App() {
           "Best leadership use: this card tells you exactly where to start coaching instead of guessing.",
       },
 
+
+      scheduleRisk: {
+        eyebrow: "Schedule adherence",
+        title: "Schedule Risk",
+        subtitle: "This compares imported June Voice / Customer Service schedules against the current queue snapshot.",
+        valueLabel: "Schedule risk flags",
+        value: scheduleSummary.phoneCoverageRisk,
+        status: scheduleSummary.phoneCoverageRisk > 0 ? "Phone coverage review needed" : "No phone schedule risk showing",
+        statusClass: scheduleSummary.riskCount > 0 ? "risk-high" : "risk-low",
+        meaning:
+          scheduleSummary.phoneCoverageRisk > 0
+            ? "These are the agents who should be covering phones now or schedule flags that need vendor validation. When customers are waiting, scheduled-but-not-seen agents are the priority exposure list."
+            : "No scheduled-and-missing phone coverage issue is showing from the latest imported schedule comparison.",
+        evidence: [
+          `${scheduleSummary.scheduledNow} agents should be taking calls right now based on imported schedules.`,
+          `${scheduleSummary.seenInQueue} scheduled agents were seen in the queue snapshot.`,
+          `${scheduleSummary.scheduledButNotSeen} scheduled agents were not seen in the queue snapshot.`,
+          `${scheduleSummary.callsOnHold} calls are currently on hold while ${scheduleSummary.agentsAvailable} agents are available.`,
+          `${scheduleSummary.offButSeen} agents marked off/leave were seen in the queue snapshot.`,
+          `${scheduleSummary.onBreakLunch} agents are inside scheduled break/lunch windows.`,
+          `${scheduleSummary.missingNameMap} schedule rows need name mapping before they can be matched safely.`,
+          scheduleSummary.checkedAt
+            ? `Last schedule check: ${formatSnapshotTime(scheduleSummary.checkedAt)}.`
+            : "No schedule check timestamp loaded yet.",
+        ],
+        actions:
+          scheduleSummary.phoneCoverageRisk > 0
+            ? [
+                "Open the Scheduled Not Seen list in the Schedule Adherence panel.",
+                "Send the vendor/team lead the agent names and ask who is logged in, available, on call, on break, or not logged in.",
+                "When calls are waiting, prioritize scheduled agents not seen before random QA review.",
+                "For Buwelo EDS codes, fill the Schedule Name Map tab if the agent name is missing.",
+                "Coach only after confirming the live status; use this as the starting point for investigation.",
+              ]
+            : [
+                "Keep schedules imported for June.",
+                "Let Watchtower save new snapshots throughout the day.",
+                "Keep the Schedule Name Map updated so agent names match the live queue.",
+              ],
+        footerNote:
+          "Best leadership use: this card separates staffing/adherence risk from QA behavior risk so the right vendor issue is addressed.",
+      },
+
       unassignedRisk: {
         eyebrow: "Data quality risk",
         title: "Unassigned Risk",
@@ -1256,12 +2052,15 @@ function App() {
     snapshotStats,
     latestSnapshot,
     callbackExposure,
+    scheduleSummary,
     flaggedAgents,
     unassignedHighRiskRows.length,
     dailyCritical.length,
     activeWatchlist.length,
     liveAgentMetrics.length,
     liveRows.length,
+    scheduleFlagsToday.length,
+    schedulesToday.length,
   ]);
 
   return (
@@ -1338,7 +2137,7 @@ function App() {
     <div className="sheet-load-banner">
   {loading
     ? "Loading Watchtower data from Google Sheets and live queue..."
-    : `Loaded today's critical agents, average scores, and snapshot evidence from Google Sheets. Last update: ${lastLoaded} | Watchlist: ${activeWatchlist.length} | Daily Critical: ${dailyCritical.length} | Live Metrics: ${liveAgentMetrics.length} | Flagged Agents: ${flaggedAgents.length}`}
+    : `Loaded today's critical agents, average scores, and snapshot evidence from Google Sheets. Last update: ${lastLoaded} | Watchlist: ${activeWatchlist.length} | Daily Critical: ${dailyCritical.length} | Live Metrics: ${liveAgentMetrics.length} | Flagged Agents: ${flaggedAgents.length} | Phone Coverage Risk: ${scheduleSummary.phoneCoverageRisk}`}
 </div>
 
       <section className="stats-grid">
@@ -1420,9 +2219,24 @@ function App() {
           countdown={refreshCountdown}
           refreshSeconds={AUTO_REFRESH_SECONDS}
         />
+
+        <StatCard
+          icon={<CalendarCheck size={22} />}
+          label="Schedule Risk"
+          value={scheduleSummary.phoneCoverageRisk}
+          sub="Click for agents who should be on phones"
+          danger={scheduleSummary.callsOnHold > 0 && scheduleSummary.scheduledButNotSeen > 0}
+          warning={scheduleSummary.riskCount > 0 || scheduleSummary.missingNameMap > 0}
+          onClick={() => setStatDetail(statDetails.scheduleRisk)}
+          tip="Shows scheduled agents who should be covering phones now, especially agents scheduled but not seen while calls are waiting."
+          loading={cardsAreLoading}
+          countdown={refreshCountdown}
+          refreshSeconds={AUTO_REFRESH_SECONDS}
+        />
+
       </section>
 
-  
+      <ScheduleAdherenceSection summary={scheduleSummary} flags={scheduleFlagsToday} />
 
       <section className="story-command-center">
         <div className="story-header">
@@ -1792,7 +2606,7 @@ function App() {
                   <div>
                     <strong>{formatValue(agent["Agent Name"])}</strong>
                     <span>
-                      {formatValue(agent.Vendor)} Â· {formatValue(agent["Calls Seen"])} calls
+                      {formatValue(agent.Vendor)} · {formatValue(agent["Calls Seen"])} calls
                     </span>
                   </div>
 
@@ -1876,7 +2690,7 @@ function App() {
                   <div>
                     <strong>{formatValue(item["Agent Name"])}</strong>
                     <span>
-                      {formatValue(item.Vendor)} Â· {formatValue(item["Issue Type"])}
+                      {formatValue(item.Vendor)} · {formatValue(item["Issue Type"])}
                     </span>
                   </div>
 
@@ -1996,7 +2810,7 @@ function App() {
       </section>
 
       <footer className="footer">
-        Watchtower Â· QA & Utilization Intelligence Â· Automatic monitoring every{" "}
+        Watchtower · QA & Utilization Intelligence · Automatic monitoring every{" "}
         {AUTO_REFRESH_SECONDS} seconds
       </footer>
 
