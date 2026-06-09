@@ -2410,3 +2410,226 @@ tr:hover td {
     grid-template-columns: 1fr;
   }
 }
+
+/* Clearer schedule popup explanation */
+.schedule-modal-explain-box {
+  margin: 18px 0 0;
+  border: 1px solid rgba(251, 191, 36, 0.34);
+  border-radius: 18px;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, rgba(120, 53, 15, 0.28), rgba(15, 23, 42, 0.74));
+  color: rgba(254, 243, 199, 0.94);
+  font-weight: 800;
+  line-height: 1.55;
+}
+
+/* Call center coverage cards */
+.call-center-coverage-section {
+  margin: 22px 0;
+}
+
+.call-center-coverage-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.call-center-coverage-card {
+  position: relative;
+  overflow: hidden;
+  min-height: 210px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.88);
+  color: #f8fafc;
+  padding: 18px;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.call-center-coverage-card::before {
+  content: "";
+  position: absolute;
+  inset: -30% -20% auto auto;
+  width: 140px;
+  height: 140px;
+  border-radius: 999px;
+  opacity: 0.32;
+  filter: blur(10px);
+}
+
+.call-center-coverage-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(56, 189, 248, 0.58);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.26);
+}
+
+.call-center-card-topline {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.call-center-card-topline span,
+.call-center-coverage-card small,
+.call-center-mini-grid span,
+.call-center-card-main-number span {
+  color: #cbd5e1;
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.call-center-card-topline b {
+  display: inline-flex;
+  justify-content: center;
+  max-width: 110px;
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: rgba(15, 23, 42, 0.74);
+  color: #f8fafc;
+  font-size: 0.68rem;
+  line-height: 1.2;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.call-center-card-name {
+  position: relative;
+  z-index: 1;
+  display: block;
+  min-height: 44px;
+  margin-bottom: 14px;
+  color: #ffffff;
+  font-size: 1.1rem;
+  line-height: 1.2;
+}
+
+.call-center-card-main-number {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.call-center-card-main-number strong {
+  color: #ffffff;
+  font-size: 2.2rem;
+  line-height: 1;
+}
+
+.call-center-mini-grid {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.call-center-mini-grid div {
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.36);
+  padding: 8px;
+}
+
+.call-center-mini-grid b {
+  display: block;
+  margin-top: 4px;
+  color: #ffffff;
+  font-size: 1.05rem;
+}
+
+.call-center-coverage-card.has-critical-risk {
+  border-color: rgba(248, 113, 113, 0.8);
+  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.18), 0 0 30px rgba(248, 113, 113, 0.12);
+}
+
+.call-center-coverage-card.has-medium-risk {
+  border-color: rgba(251, 191, 36, 0.78);
+}
+
+.call-center-coverage-card.has-mapping-risk {
+  border-color: rgba(234, 179, 8, 0.75);
+}
+
+.call-center-coverage-card.has-no-data {
+  opacity: 0.72;
+}
+
+.call-center-coverage-card.cc-buwelo-colombia::before {
+  background: #f97316;
+}
+
+.call-center-coverage-card.cc-buwelo-ghana::before {
+  background: #22c55e;
+}
+
+.call-center-coverage-card.cc-telus::before {
+  background: #a855f7;
+}
+
+.call-center-coverage-card.cc-wns::before {
+  background: #06b6d4;
+}
+
+.call-center-coverage-card.cc-tep::before {
+  background: #3b82f6;
+}
+
+.call-center-coverage-card.cc-concentrix::before {
+  background: #ec4899;
+}
+
+.call-center-coverage-card.cc-buwelo-colombia {
+  background: linear-gradient(145deg, rgba(67, 20, 7, 0.66), rgba(15, 23, 42, 0.94));
+}
+
+.call-center-coverage-card.cc-buwelo-ghana {
+  background: linear-gradient(145deg, rgba(20, 83, 45, 0.56), rgba(15, 23, 42, 0.94));
+}
+
+.call-center-coverage-card.cc-telus {
+  background: linear-gradient(145deg, rgba(88, 28, 135, 0.56), rgba(15, 23, 42, 0.94));
+}
+
+.call-center-coverage-card.cc-wns {
+  background: linear-gradient(145deg, rgba(8, 51, 68, 0.62), rgba(15, 23, 42, 0.94));
+}
+
+.call-center-coverage-card.cc-tep {
+  background: linear-gradient(145deg, rgba(30, 58, 138, 0.62), rgba(15, 23, 42, 0.94));
+}
+
+.call-center-coverage-card.cc-concentrix {
+  background: linear-gradient(145deg, rgba(131, 24, 67, 0.56), rgba(15, 23, 42, 0.94));
+}
+
+@media (max-width: 1500px) {
+  .call-center-coverage-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .call-center-coverage-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .call-center-coverage-grid {
+    grid-template-columns: 1fr;
+  }
+}

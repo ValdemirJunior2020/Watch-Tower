@@ -132,6 +132,111 @@ function formatSnapshotTime(value) {
   });
 }
 
+
+function parseScheduleTimeParts(value) {
+  if (value === undefined || value === null || value === "") return null;
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return {
+      hour: value.getHours(),
+      minute: value.getMinutes(),
+    };
+  }
+
+  const raw = String(value).trim();
+  if (!raw || raw === "—") return null;
+
+  // Google Sheets often returns time-only values as fake ISO dates like
+  // 1899-12-30T14:00:00.000Z. That means 2:00 PM, not Dec 30, 1899.
+  const isoTimeOnly = raw.match(/^\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2})(?::\d{2})?(?:\.\d+)?Z?$/);
+  if (isoTimeOnly) {
+    return {
+      hour: Number(isoTimeOnly[1]),
+      minute: Number(isoTimeOnly[2]),
+    };
+  }
+
+  const standardTime = raw.match(/^(\d{1,2}):(\d{2})\s*([AP]M)?$/i);
+  if (standardTime) {
+    let hour = Number(standardTime[1]);
+    const minute = Number(standardTime[2]);
+    const ampm = standardTime[3] ? standardTime[3].toUpperCase() : "";
+
+    if (ampm === "PM" && hour < 12) hour += 12;
+    if (ampm === "AM" && hour === 12) hour = 0;
+
+    return { hour, minute };
+  }
+
+  const compactTime = raw.match(/^(\d{1,2})\s*([AP]M)$/i);
+  if (compactTime) {
+    let hour = Number(compactTime[1]);
+    const ampm = compactTime[2].toUpperCase();
+
+    if (ampm === "PM" && hour < 12) hour += 12;
+    if (ampm === "AM" && hour === 12) hour = 0;
+
+    return { hour, minute: 0 };
+  }
+
+  return null;
+}
+
+function formatScheduleTime(value, fallback = "—") {
+  const parts = parseScheduleTimeParts(value);
+  if (!parts) {
+    return formatValue(value, fallback);
+  }
+
+  const date = new Date(2000, 0, 1, parts.hour, parts.minute, 0);
+  return date.toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatScheduleRange(start, end) {
+  const startLabel = formatScheduleTime(start);
+  const endLabel = formatScheduleTime(end);
+  if (startLabel === "—" && endLabel === "—") return "—";
+  return `${startLabel} - ${endLabel}`;
+}
+
+function getScheduleAgentMatchStatus(agent) {
+  return String(
+    agent?.matchStatus ||
+      agent?.["Name Match Status"] ||
+      agent?.nameMatchStatus ||
+      agent?.["Match Quality"] ||
+      agent?.matchQuality ||
+      ""
+  ).trim();
+}
+
+function needsNameMap(agent) {
+  return getScheduleAgentMatchStatus(agent).toLowerCase().includes("needs name map");
+}
+
+function getQueueVisibilityLabel(agent) {
+  if (needsNameMap(agent)) return "Cannot check yet";
+  if (agent?.seen === true) return "Seen in queue";
+  if (agent?.seen === false) return "Not seen in queue";
+  return "Not checked";
+}
+
+function getQueueVisibilityClass(agent) {
+  if (needsNameMap(agent)) return "severity-medium";
+  if (agent?.seen === true) return "severity-low";
+  if (agent?.seen === false) return "severity-high";
+  return "severity-neutral";
+}
+
+function getNameMapInstruction(agent) {
+  const vendor = formatValue(agent?.vendor, "Vendor");
+  const agentId = formatValue(agent?.agentId, "Agent ID");
+  return `Add this in Schedule Name Map: Vendor=${vendor}, Agent ID=${agentId}, Queue Name Override=exact live queue agent name, Active=Yes.`;
+}
+
 function getSnapshotNumber(snapshot, key) {
   return safeNumber(snapshotValue(snapshot, key, 0));
 }
@@ -722,18 +827,7 @@ function isAgentVisibleInQueue(name, visibleMap) {
 }
 
 function parseTimeParts(timeText) {
-  const raw = String(timeText || "").trim();
-  const match = raw.match(/^(\d{1,2}):(\d{2})\s*([AP]M)?$/i);
-  if (!match) return null;
-
-  let hour = Number(match[1]);
-  const minute = Number(match[2]);
-  const ampm = match[3] ? match[3].toUpperCase() : "";
-
-  if (ampm === "PM" && hour < 12) hour += 12;
-  if (ampm === "AM" && hour === 12) hour = 0;
-
-  return { hour, minute };
+  return parseScheduleTimeParts(timeText);
 }
 
 function dateTimeFromDateAndTime(dateKey, timeText) {
@@ -802,8 +896,22 @@ function buildScheduleCoverageFromImportedSchedules(schedulesToday, liveRows, li
     const end = scheduleField(schedule, "Scheduled End", "scheduledEnd", "");
     const status = scheduleField(schedule, "Schedule Status", "scheduleStatus", "");
 
-    if (String(matchStatus).toLowerCase().includes("needs name map")) {
-      needsNameMapAgents.push({ vendor, agentId, agentName, start, end, status, matchStatus, source: schedule });
+    const needsMap = String(matchStatus).toLowerCase().includes("needs name map");
+    if (needsMap) {
+      needsNameMapAgents.push({
+        vendor,
+        agentId,
+        agentName,
+        start,
+        end,
+        status,
+        seen: null,
+        matchStatus,
+        source: schedule,
+        evidence:
+          "Cannot compare this schedule row to the live queue until the EDS/code is mapped to the exact queue agent name.",
+      });
+      return;
     }
 
     if (!isScheduleRowWorkingNow(schedule, now)) return;
@@ -924,6 +1032,283 @@ function buildScheduleSummary(coverage, flags, schedulesToday, importedCoverage,
 }
 
 
+
+const CALL_CENTER_CONFIGS = [
+  {
+    id: "buwelo-colombia",
+    label: "Buwelo Colombia",
+    shortLabel: "Buwelo-C",
+    className: "cc-buwelo-colombia",
+    helper: "Buwelo rows with C/Colombia identifiers are grouped here.",
+  },
+  {
+    id: "buwelo-ghana",
+    label: "Buwelo Ghana",
+    shortLabel: "Buwelo-G",
+    className: "cc-buwelo-ghana",
+    helper: "Buwelo rows with G/Ghana identifiers are grouped here.",
+  },
+  {
+    id: "telus",
+    label: "Telus",
+    shortLabel: "Telus",
+    className: "cc-telus",
+    helper: "Shows Telus schedule, queue, and flag data when imported or seen live.",
+  },
+  {
+    id: "wns",
+    label: "WNS",
+    shortLabel: "WNS",
+    className: "cc-wns",
+    helper: "Shows WNS Voice/Nesting coverage once WNS schedule data is connected.",
+  },
+  {
+    id: "tep",
+    label: "TEP",
+    shortLabel: "TEP",
+    className: "cc-tep",
+    helper: "Teleperformance schedule rows with real names should show here.",
+  },
+  {
+    id: "concentrix",
+    label: "Concentrix",
+    shortLabel: "Concentrix",
+    className: "cc-concentrix",
+    helper: "Shows Concentrix schedule, queue, and flag data when imported or seen live.",
+  },
+];
+
+function normalizeVendorText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function recordField(record, names, fallback = "") {
+  for (const name of names) {
+    const value = record?.[name];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return fallback;
+}
+
+function getRecordVendor(record) {
+  return recordField(record, ["Vendor", "vendor"], "Unknown");
+}
+
+function getRecordAgentId(record) {
+  return String(recordField(record, ["Agent ID", "agentId", "agentID", "Ident", "ident"], "")).trim();
+}
+
+function getRecordAgentName(record) {
+  return recordField(record, ["Agent Name", "agentName", "agent", "Name", "name"], "Unknown Agent");
+}
+
+function getRecordCombinedText(record) {
+  return normalizeVendorText(
+    [
+      getRecordVendor(record),
+      getRecordAgentId(record),
+      getRecordAgentName(record),
+      recordField(record, ["Source Sheet", "sourceSheet"], ""),
+      recordField(record, ["Schedule Source", "scheduleSource"], ""),
+      recordField(record, ["Team Lead", "teamLead"], ""),
+      recordField(record, ["LOB", "lob"], ""),
+    ].join(" ")
+  );
+}
+
+function callCenterIdForRecord(record) {
+  const vendor = normalizeVendorText(getRecordVendor(record));
+  const agentId = getRecordAgentId(record).toUpperCase();
+  const text = getRecordCombinedText(record);
+
+  if (vendor.includes("teleperformance") || vendor === "tep" || text.includes(" tep ") || text.startsWith("tep ")) {
+    return "tep";
+  }
+  if (vendor.includes("wns") || text.includes(" wns ") || text.startsWith("wns ")) {
+    return "wns";
+  }
+  if (vendor.includes("telus") || text.includes(" telus ") || text.startsWith("telus ")) {
+    return "telus";
+  }
+  if (vendor.includes("concentrix") || text.includes(" concentrix ") || text.startsWith("concentrix ")) {
+    return "concentrix";
+  }
+  if (vendor.includes("buwelo") || text.includes("buwelo")) {
+    if (text.includes("ghana") || text.includes(" buwelo g") || text.includes("buwelo g ") || agentId.startsWith("G")) {
+      return "buwelo-ghana";
+    }
+    if (text.includes("colombia") || text.includes(" buwelo c") || text.includes("buwelo c ") || agentId.startsWith("C")) {
+      return "buwelo-colombia";
+    }
+
+    // Current Buwelo schedule rows are mostly C-style EDS rows. Until the source distinguishes
+    // Ghana vs Colombia, keep unsplit Buwelo rows under Colombia so they are not hidden.
+    return "buwelo-colombia";
+  }
+
+  return "other";
+}
+
+function belongsToCallCenter(record, callCenterId) {
+  return callCenterIdForRecord(record) === callCenterId;
+}
+
+function getCallCenterStatus(card) {
+  if (card.scheduledNotSeen > 0) return "Coverage exposed";
+  if (card.offButSeen > 0) return "Schedule mismatch";
+  if (card.needsNameMap > 0) return "Mapping blocker";
+  if (card.scheduledNow > 0 && card.seenInQueue === card.scheduledNow) return "No current issue";
+  if (card.totalRecords > 0) return "Data loaded";
+  return "No data yet";
+}
+
+function getCallCenterCardTone(card) {
+  if (card.scheduledNotSeen > 0) return "has-critical-risk";
+  if (card.offButSeen > 0) return "has-medium-risk";
+  if (card.needsNameMap > 0) return "has-mapping-risk";
+  if (card.totalRecords > 0) return "has-data";
+  return "has-no-data";
+}
+
+function getFlagType(flag) {
+  return String(flag?.["Flag Type"] || flag?.flagType || "");
+}
+
+function getFlagRowType(flag) {
+  const type = getFlagType(flag).toLowerCase();
+  if (type.includes("scheduled but not seen")) return "Scheduled not seen";
+  if (type.includes("not scheduled but seen") || type.includes("off but seen")) return "Off/leave but seen";
+  return type ? getFlagType(flag) : "Saved schedule flag";
+}
+
+function makeCallCenterAgentRow(agent, rowType, evidenceOverride = "") {
+  return {
+    rowType,
+    vendor: agent.vendor || getRecordVendor(agent.source || agent),
+    agentName: agent.agentName || getRecordAgentName(agent.source || agent),
+    agentId: agent.agentId || getRecordAgentId(agent.source || agent),
+    start: agent.start || recordField(agent.source || agent, ["Scheduled Start", "scheduledStart"], ""),
+    end: agent.end || recordField(agent.source || agent, ["Scheduled End", "scheduledEnd"], ""),
+    status: agent.status || recordField(agent.source || agent, ["Schedule Status", "scheduleStatus"], ""),
+    queueVisibility:
+      agent.seen === true ? "Seen in queue" : agent.seen === false ? "Not seen in queue" : "Cannot check yet",
+    matchStatus: agent.matchStatus || recordField(agent.source || agent, ["Name Match Status", "nameMatchStatus"], ""),
+    breakWindow: agent.breakWindow || "",
+    evidence: evidenceOverride || agent.evidence || "No evidence text saved yet.",
+  };
+}
+
+function makeCallCenterFlagRow(flag) {
+  return {
+    rowType: getFlagRowType(flag),
+    vendor: flag.Vendor || flag.vendor || "Unknown",
+    agentName: flag["Agent Name"] || flag.agentName || "Unknown Agent",
+    agentId: flag["Agent ID"] || flag.agentId || "",
+    start: flag["Scheduled Start"] || flag.scheduledStart || "",
+    end: flag["Scheduled End"] || flag.scheduledEnd || "",
+    status: flag["Expected Status"] || flag.expectedStatus || "",
+    queueVisibility: flag["Actual Status"] || flag.actualStatus || "",
+    matchStatus: flag["Match Quality"] || flag.matchQuality || "",
+    breakWindow: flag["Break/Lunch Window"] || flag.breakLunchWindow || "",
+    evidence: flag.Evidence || flag.evidence || "No evidence text saved yet.",
+  };
+}
+
+function buildCallCenterCards({
+  shouldBeWorkingAgents,
+  seenAgents,
+  exposedAgents,
+  onBreakAgents,
+  needsNameMapAgents,
+  visibleFlags,
+}) {
+  return CALL_CENTER_CONFIGS.map((config) => {
+    const shouldRows = shouldBeWorkingAgents.filter((row) => belongsToCallCenter(row.source || row, config.id));
+    const seenRows = seenAgents.filter((row) => belongsToCallCenter(row.source || row, config.id));
+    const exposedRows = exposedAgents.filter((row) => belongsToCallCenter(row.source || row, config.id));
+    const breakRows = onBreakAgents.filter((row) => belongsToCallCenter(row.source || row, config.id));
+    const mapRows = needsNameMapAgents.filter((row) => belongsToCallCenter(row.source || row, config.id));
+    const flagRows = visibleFlags.filter((row) => belongsToCallCenter(row, config.id));
+
+    const offButSeenRows = flagRows.filter((flag) => {
+      const type = getFlagType(flag).toLowerCase();
+      return type.includes("not scheduled but seen") || type.includes("off but seen");
+    });
+
+    const issueCount = exposedRows.length + offButSeenRows.length;
+    const blockerCount = mapRows.length;
+    const totalRecords = shouldRows.length + breakRows.length + mapRows.length + flagRows.length;
+
+    const detailRows = [
+      ...exposedRows.map((row) =>
+        makeCallCenterAgentRow(
+          row,
+          "Scheduled not seen",
+          "This agent is scheduled now, not in an imported break/lunch window, and was not found in the live queue snapshot. Validate login/availability with the vendor lead."
+        )
+      ),
+      ...offButSeenRows.map(makeCallCenterFlagRow),
+      ...seenRows.map((row) =>
+        makeCallCenterAgentRow(row, "Seen in queue", "This agent is scheduled now and was found in the live queue snapshot.")
+      ),
+      ...breakRows.map((row) =>
+        makeCallCenterAgentRow(row, "On break/lunch", "This agent is inside an imported break/lunch window. Do not treat as missing without validation.")
+      ),
+      ...mapRows.map((row) =>
+        makeCallCenterAgentRow(
+          row,
+          "Needs name map",
+          "This schedule row has an ID/code but not an exact queue-matchable agent name. Fill Schedule Name Map before treating this as missing."
+        )
+      ),
+    ];
+
+    return {
+      ...config,
+      scheduledNow: shouldRows.length,
+      seenInQueue: seenRows.length,
+      scheduledNotSeen: exposedRows.length,
+      onBreakLunch: breakRows.length,
+      offButSeen: offButSeenRows.length,
+      needsNameMap: blockerCount,
+      issueCount,
+      blockerCount,
+      totalRecords,
+      status: getCallCenterStatus({
+        scheduledNotSeen: exposedRows.length,
+        offButSeen: offButSeenRows.length,
+        needsNameMap: blockerCount,
+        scheduledNow: shouldRows.length,
+        seenInQueue: seenRows.length,
+        totalRecords,
+      }),
+      tone: getCallCenterCardTone({
+        scheduledNotSeen: exposedRows.length,
+        offButSeen: offButSeenRows.length,
+        needsNameMap: blockerCount,
+        totalRecords,
+      }),
+      detailRows,
+    };
+  });
+}
+
+function getCallCenterRowClass(rowType) {
+  const type = String(rowType || "").toLowerCase();
+  if (type.includes("scheduled not seen")) return "severity-high";
+  if (type.includes("off") || type.includes("mismatch")) return "severity-medium";
+  if (type.includes("name map") || type.includes("cannot")) return "severity-medium";
+  if (type.includes("seen")) return "severity-low";
+  if (type.includes("break") || type.includes("lunch")) return "severity-neutral";
+  return "severity-neutral";
+}
+
 function ScheduleExposureModal({ detail, onClose }) {
   if (!detail) return null;
 
@@ -951,6 +1336,8 @@ function ScheduleExposureModal({ detail, onClose }) {
           </button>
         </div>
 
+        {detail.note ? <div className="schedule-modal-explain-box">{detail.note}</div> : null}
+
         <div className="schedule-modal-summary-row">
           <div>
             <span>Total records</span>
@@ -967,6 +1354,74 @@ function ScheduleExposureModal({ detail, onClose }) {
             <Eye size={34} />
             <h3>No records found for this card.</h3>
             <p>{detail.emptyText || "There is no saved data behind this schedule card yet."}</p>
+          </div>
+        ) : mode === "callCenter" ? (
+          <div className="table-wrap schedule-modal-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Result</th>
+                  <th>Vendor</th>
+                  <th>Agent</th>
+                  <th>Agent ID</th>
+                  <th>Scheduled shift</th>
+                  <th>Queue visibility</th>
+                  <th>Break/Lunch</th>
+                  <th>Match</th>
+                  <th>Evidence / Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, index) => (
+                  <tr key={`${row.vendor}-${row.agentId || row.agentName}-${row.rowType}-${index}`}>
+                    <td>
+                      <span className={`severity-badge ${getCallCenterRowClass(row.rowType)}`}>
+                        {formatValue(row.rowType)}
+                      </span>
+                    </td>
+                    <td>{formatValue(row.vendor)}</td>
+                    <td className="strong-cell">{formatValue(row.agentName)}</td>
+                    <td>{formatValue(row.agentId)}</td>
+                    <td>{formatScheduleRange(row.start, row.end)}</td>
+                    <td>{formatValue(row.queueVisibility)}</td>
+                    <td>{formatValue(row.breakWindow)}</td>
+                    <td>{formatValue(row.matchStatus)}</td>
+                    <td className="evidence-cell">{formatValue(row.evidence)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : mode === "nameMap" ? (
+          <div className="table-wrap schedule-modal-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Vendor</th>
+                  <th>EDS / Agent ID</th>
+                  <th>Schedule placeholder</th>
+                  <th>Scheduled shift</th>
+                  <th>Status</th>
+                  <th>Match problem</th>
+                  <th>What to do</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((agent, index) => (
+                  <tr key={`${agent.vendor}-${agent.agentId || agent.agentName}-${index}`}>
+                    <td>{formatValue(agent.vendor)}</td>
+                    <td className="strong-cell">{formatValue(agent.agentId)}</td>
+                    <td>{formatValue(agent.agentName)}</td>
+                    <td>{formatScheduleRange(agent.start, agent.end)}</td>
+                    <td>{formatValue(agent.status)}</td>
+                    <td>
+                      <span className="severity-badge severity-medium">Needs Name Map</span>
+                    </td>
+                    <td className="evidence-cell">{getNameMapInstruction(agent)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         ) : mode === "flags" ? (
           <div className="table-wrap schedule-modal-table-wrap">
@@ -999,7 +1454,10 @@ function ScheduleExposureModal({ detail, onClose }) {
                     <td>{formatValue(flag["Expected Status"] || flag.expectedStatus)}</td>
                     <td>{formatValue(flag["Actual Status"] || flag.actualStatus)}</td>
                     <td>
-                      {formatValue(flag["Scheduled Start"] || flag.scheduledStart)} - {formatValue(flag["Scheduled End"] || flag.scheduledEnd)}
+                      {formatScheduleRange(
+                        flag["Scheduled Start"] || flag.scheduledStart,
+                        flag["Scheduled End"] || flag.scheduledEnd
+                      )}
                     </td>
                     <td className="evidence-cell">{formatValue(flag.Evidence || flag.evidence)}</td>
                   </tr>
@@ -1015,11 +1473,11 @@ function ScheduleExposureModal({ detail, onClose }) {
                   <th>Vendor</th>
                   <th>Agent</th>
                   <th>Agent ID</th>
-                  <th>Scheduled</th>
-                  <th>Status</th>
-                  <th>Seen?</th>
+                  <th>Scheduled shift</th>
+                  <th>Schedule status</th>
+                  <th>Queue visibility</th>
                   <th>Break/Lunch</th>
-                  <th>Match</th>
+                  <th>Match status</th>
                   <th>Evidence</th>
                 </tr>
               </thead>
@@ -1029,11 +1487,11 @@ function ScheduleExposureModal({ detail, onClose }) {
                     <td>{formatValue(agent.vendor)}</td>
                     <td className="strong-cell">{formatValue(agent.agentName)}</td>
                     <td>{formatValue(agent.agentId)}</td>
-                    <td>{formatValue(agent.start)} - {formatValue(agent.end)}</td>
+                    <td>{formatScheduleRange(agent.start, agent.end)}</td>
                     <td>{formatValue(agent.status)}</td>
                     <td>
-                      <span className={`severity-badge ${agent.seen ? "severity-low" : "severity-high"}`}>
-                        {agent.seen ? "Seen" : "Not Seen"}
+                      <span className={`severity-badge ${getQueueVisibilityClass(agent)}`}>
+                        {getQueueVisibilityLabel(agent)}
                       </span>
                     </td>
                     <td>{formatValue(agent.breakWindow)}</td>
@@ -1073,14 +1531,26 @@ function ScheduleAdherenceSection({ summary, flags }) {
     return type.includes("not scheduled but seen") || type.includes("off but seen");
   });
 
-  const openAgentModal = (title, subtitle, rows, purpose, emptyText) => {
+  const callCenterCards = useMemo(() => {
+    return buildCallCenterCards({
+      shouldBeWorkingAgents,
+      seenAgents,
+      exposedAgents,
+      onBreakAgents,
+      needsNameMapAgents,
+      visibleFlags,
+    });
+  }, [shouldBeWorkingAgents, seenAgents, exposedAgents, onBreakAgents, needsNameMapAgents, visibleFlags]);
+
+  const openAgentModal = (title, subtitle, rows, purpose, emptyText, mode = "agents", note = "") => {
     setScheduleDetail({
       title,
       subtitle,
       rows,
       purpose,
       emptyText,
-      mode: "agents",
+      mode,
+      note,
     });
   };
 
@@ -1103,8 +1573,10 @@ function ScheduleAdherenceSection({ summary, flags }) {
           <h2>Agents who should be taking calls right now</h2>
           <p>
             This section exposes the scheduled Voice / Customer Service agents who should be covering
-            the phone queue now. When calls are waiting, the priority list is the agents scheduled now
-            but not seen in the queue snapshot.
+            the phone queue now. <strong>Seen</strong> means the agent name was found in the live queue snapshot.
+            <strong> Not seen</strong> means the name was not found in that snapshot and must be validated with
+            live login status before coaching. <strong>Needs name map</strong> means Watchtower cannot check the
+            row yet because Buwelo sent an EDS/code instead of a queue-matchable name.
           </p>
         </div>
       </div>
@@ -1128,10 +1600,85 @@ function ScheduleAdherenceSection({ summary, flags }) {
           <p>
             {exposedAgents.length > 0
               ? `${exposedAgents.length} scheduled agents are not seen in the queue snapshot. Click to expose the agent list.`
-              : "No scheduled-and-missing phone coverage agents are detected from the imported schedules right now. Click to inspect the backing list."}
+              : summary.missingNameMap > 0
+                ? `${summary.missingNameMap} schedule rows cannot be checked yet because they need name mapping. Click Needs Name Map to fix the match.`
+                : "No scheduled-and-missing phone coverage agents are detected from the imported schedules right now. Click to inspect the backing list."}
           </p>
         </div>
       </button>
+
+      <div className="call-center-coverage-section">
+        <div className="story-table-title">
+          <h3>Call center phone coverage by vendor</h3>
+          <span>Click any card to see issues and non-issues</span>
+        </div>
+
+        <div className="call-center-coverage-grid">
+          {callCenterCards.map((card) => (
+            <button
+              type="button"
+              className={`call-center-coverage-card ${card.className} ${card.tone}`}
+              key={card.id}
+              onClick={() =>
+                setScheduleDetail({
+                  eyebrow: "Call center coverage",
+                  title: `${card.label} — issues and non-issues`,
+                  subtitle:
+                    card.totalRecords > 0
+                      ? "This popup shows every available row behind this vendor card: missing agents, seen agents, break/lunch rows, off-but-seen flags, and mapping blockers."
+                      : "No schedule or queue rows are connected to this call center yet.",
+                  rows: card.detailRows,
+                  purpose: card.status,
+                  emptyText:
+                    "No imported schedule rows or saved schedule flags were found for this call center. Add/import that call center schedule first, then let Watchtower save a new snapshot.",
+                  mode: "callCenter",
+                  note:
+                    card.needsNameMap > 0
+                      ? `${card.needsNameMap} row(s) need name mapping before Watchtower can safely judge them as seen or not seen.`
+                      : card.scheduledNotSeen > 0
+                        ? `${card.scheduledNotSeen} scheduled agent(s) were not seen in the live queue snapshot. Validate login/availability before coaching.`
+                        : card.totalRecords > 0
+                          ? "No missing-agent exposure is showing from the rows currently loaded for this call center."
+                          : card.helper,
+                })
+              }
+            >
+              <div className="call-center-card-topline">
+                <span>{card.shortLabel}</span>
+                <b>{card.status}</b>
+              </div>
+
+              <strong className="call-center-card-name">{card.label}</strong>
+
+              <div className="call-center-card-main-number">
+                <span>Issues</span>
+                <strong>{card.issueCount}</strong>
+              </div>
+
+              <div className="call-center-mini-grid">
+                <div>
+                  <span>Should</span>
+                  <b>{card.scheduledNow}</b>
+                </div>
+                <div>
+                  <span>Seen</span>
+                  <b>{card.seenInQueue}</b>
+                </div>
+                <div>
+                  <span>Missing</span>
+                  <b>{card.scheduledNotSeen}</b>
+                </div>
+                <div>
+                  <span>Map</span>
+                  <b>{card.needsNameMap}</b>
+                </div>
+              </div>
+
+              <small>Click to see all rows</small>
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div className="schedule-kpi-grid phone-schedule-kpi-grid">
         <button
@@ -1229,11 +1776,13 @@ function ScheduleAdherenceSection({ summary, flags }) {
           className={`schedule-kpi-tile ${summary.missingNameMap > 0 ? "schedule-warning-kpi" : ""}`}
           onClick={() =>
             openAgentModal(
-              "Schedule rows that need name mapping",
-              "These rows cannot be matched safely to the live queue because the schedule has an ID/code without a queue-matchable name. Buwelo EDS codes usually need this map.",
+              "Buwelo EDS codes that need real queue names",
+              "These rows are not counted as seen or not seen yet. They must be mapped first because the schedule only shows an EDS/code, not the exact agent name from the live queue.",
               needsNameMapAgents,
-              "Fix name mapping",
-              "No schedule rows need name mapping right now."
+              "Map EDS to queue names",
+              "No schedule rows need name mapping right now.",
+              "nameMap",
+              "For this popup, do not treat the agents as missing yet. Fill the Schedule Name Map tab so Watchtower can compare C818/C687/etc. to the real live queue agent names."
             )
           }
         >
@@ -1267,7 +1816,7 @@ function ScheduleAdherenceSection({ summary, flags }) {
                     <td>{formatValue(agent.vendor)}</td>
                     <td className="strong-cell">{formatValue(agent.agentName)}</td>
                     <td>{formatValue(agent.agentId)}</td>
-                    <td>{formatValue(agent.start)} - {formatValue(agent.end)}</td>
+                    <td>{formatScheduleRange(agent.start, agent.end)}</td>
                     <td>
                       <span className="severity-badge severity-high">Scheduled Not Seen</span>
                     </td>
@@ -1292,7 +1841,7 @@ function ScheduleAdherenceSection({ summary, flags }) {
                   <th>Agent</th>
                   <th>Agent ID</th>
                   <th>Scheduled</th>
-                  <th>Seen?</th>
+                  <th>Queue visibility</th>
                 </tr>
               </thead>
               <tbody>
@@ -1301,10 +1850,10 @@ function ScheduleAdherenceSection({ summary, flags }) {
                     <td>{formatValue(agent.vendor)}</td>
                     <td className="strong-cell">{formatValue(agent.agentName)}</td>
                     <td>{formatValue(agent.agentId)}</td>
-                    <td>{formatValue(agent.start)} - {formatValue(agent.end)}</td>
+                    <td>{formatScheduleRange(agent.start, agent.end)}</td>
                     <td>
-                      <span className={`severity-badge ${agent.seen ? "severity-low" : "severity-high"}`}>
-                        {agent.seen ? "Seen" : "Not Seen"}
+                      <span className={`severity-badge ${getQueueVisibilityClass(agent)}`}>
+                        {getQueueVisibilityLabel(agent)}
                       </span>
                     </td>
                   </tr>
@@ -1355,7 +1904,10 @@ function ScheduleAdherenceSection({ summary, flags }) {
                     <td>{formatValue(flag["Expected Status"] || flag.expectedStatus)}</td>
                     <td>{formatValue(flag["Actual Status"] || flag.actualStatus)}</td>
                     <td>
-                      {formatValue(flag["Scheduled Start"] || flag.scheduledStart)} - {formatValue(flag["Scheduled End"] || flag.scheduledEnd)}
+                      {formatScheduleRange(
+                        flag["Scheduled Start"] || flag.scheduledStart,
+                        flag["Scheduled End"] || flag.scheduledEnd
+                      )}
                     </td>
                     <td className="evidence-cell">{formatValue(flag.Evidence || flag.evidence)}</td>
                   </tr>
