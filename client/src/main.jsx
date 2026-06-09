@@ -23,7 +23,7 @@ const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:8080";
 
 const GOOGLE_SHEET_DATABASE_URL =
   import.meta.env.VITE_GOOGLE_SHEET_DATABASE_URL ||
-  "https://docs.google.com/spreadsheets/d/1aOfpStv8ZApqvG5-cKuEKiKuVwO0u-DE_s2vgK83A8M/edit?usp=sharing";
+  "https://docs.google.com/spreadsheets/d/13IxCpTTyUXF-ssFI7PcSbO8xfsauJvkZkOPQcpETJc4/edit?gid=1129431701#gid=1129431701";
 
 const AUTO_REFRESH_SECONDS = Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 60);
 
@@ -40,6 +40,95 @@ function safeNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function formatValue(value, fallback = "—") {
+  if (value === undefined || value === null || value === "") return fallback;
+  return value;
+}
+
+function getCallerFullPhone(row) {
+  const normalized =
+    row?.["Caller Phone Normalized"] ||
+    row?.callerPhoneNormalized ||
+    row?.callerNormalized ||
+    "";
+
+  const raw =
+    row?.["Caller Phone"] ||
+    row?.callerPhone ||
+    row?.caller ||
+    row?.Caller ||
+    "";
+
+  const normalizedDigits = String(normalized || "").replace(/\D+/g, "");
+  if (normalizedDigits) return normalizedDigits;
+
+  const rawDigits = String(raw || "").replace(/\D+/g, "");
+  if (rawDigits) return rawDigits;
+
+  return "—";
+}
+
+function getCallerRawPhone(row) {
+  return (
+    row?.["Caller Phone"] ||
+    row?.callerPhone ||
+    row?.caller ||
+    row?.Caller ||
+    "—"
+  );
+}
+
+function getCallerWaitSeconds(row) {
+  return safeNumber(row?.["Duration Seconds"] ?? row?.durationSeconds ?? 0);
+}
+
+function getCallerWaitLabel(row) {
+  return (
+    row?.Duration ||
+    row?.duration ||
+    row?.durationLabel ||
+    row?.["Duration"] ||
+    "—"
+  );
+}
+
+function buildCallerExposureSummary(rows, baseSummary = {}) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  const uniqueCallers = {};
+  const callbackRiskCallers = {};
+  const voicemailRiskCallers = {};
+  let maxWaitSeconds = safeNumber(baseSummary.maxWaitSeconds);
+
+  sourceRows.forEach((row) => {
+    const phone = getCallerFullPhone(row);
+    if (phone === "—") return;
+
+    uniqueCallers[phone] = true;
+
+    const waitSeconds = getCallerWaitSeconds(row);
+    maxWaitSeconds = Math.max(maxWaitSeconds, waitSeconds);
+
+    if (String(row?.["Callback Risk"] || row?.callbackRisk || "").toLowerCase() === "yes") {
+      callbackRiskCallers[phone] = true;
+    }
+
+    if (String(row?.["Voicemail Risk"] || row?.voicemailRisk || "").toLowerCase() === "yes") {
+      voicemailRiskCallers[phone] = true;
+    }
+  });
+
+  return {
+    rows: safeNumber(baseSummary.rows) || sourceRows.length,
+    uniqueCallers: safeNumber(baseSummary.uniqueCallers) || Object.keys(uniqueCallers).length,
+    callbackRiskCallers:
+      safeNumber(baseSummary.callbackRiskCallers) || Object.keys(callbackRiskCallers).length,
+    voicemailRiskCallers:
+      safeNumber(baseSummary.voicemailRiskCallers) || Object.keys(voicemailRiskCallers).length,
+    maxWaitSeconds,
+    maxWaitDuration: baseSummary.maxWaitDuration || secondsToClock(maxWaitSeconds),
+  };
+}
+
 function secondsToClock(seconds) {
   const total = Math.max(0, safeNumber(seconds));
   const h = Math.floor(total / 3600);
@@ -47,13 +136,20 @@ function secondsToClock(seconds) {
   const s = total % 60;
 
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function formatValue(value, fallback = "—") {
-  if (value === undefined || value === null || value === "") return fallback;
-  return value;
+function yesNoBadge(value) {
+  const isYes = String(value || "").toLowerCase() === "yes";
+
+  return (
+    <span className={`severity-badge ${isYes ? "severity-high" : "severity-low"}`}>
+      {isYes ? "YES" : "NO"}
+    </span>
+  );
 }
+
 
 function severityWeight(value) {
   const severity = String(value || "").toLowerCase();
@@ -140,111 +236,6 @@ function formatSnapshotTime(value) {
     minute: "2-digit",
     second: "2-digit",
   });
-}
-
-
-function parseScheduleTimeParts(value) {
-  if (value === undefined || value === null || value === "") return null;
-
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return {
-      hour: value.getHours(),
-      minute: value.getMinutes(),
-    };
-  }
-
-  const raw = String(value).trim();
-  if (!raw || raw === "—") return null;
-
-  // Google Sheets often returns time-only values as fake ISO dates like
-  // 1899-12-30T14:00:00.000Z. That means 2:00 PM, not Dec 30, 1899.
-  const isoTimeOnly = raw.match(/^\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2})(?::\d{2})?(?:\.\d+)?Z?$/);
-  if (isoTimeOnly) {
-    return {
-      hour: Number(isoTimeOnly[1]),
-      minute: Number(isoTimeOnly[2]),
-    };
-  }
-
-  const standardTime = raw.match(/^(\d{1,2}):(\d{2})\s*([AP]M)?$/i);
-  if (standardTime) {
-    let hour = Number(standardTime[1]);
-    const minute = Number(standardTime[2]);
-    const ampm = standardTime[3] ? standardTime[3].toUpperCase() : "";
-
-    if (ampm === "PM" && hour < 12) hour += 12;
-    if (ampm === "AM" && hour === 12) hour = 0;
-
-    return { hour, minute };
-  }
-
-  const compactTime = raw.match(/^(\d{1,2})\s*([AP]M)$/i);
-  if (compactTime) {
-    let hour = Number(compactTime[1]);
-    const ampm = compactTime[2].toUpperCase();
-
-    if (ampm === "PM" && hour < 12) hour += 12;
-    if (ampm === "AM" && hour === 12) hour = 0;
-
-    return { hour, minute: 0 };
-  }
-
-  return null;
-}
-
-function formatScheduleTime(value, fallback = "—") {
-  const parts = parseScheduleTimeParts(value);
-  if (!parts) {
-    return formatValue(value, fallback);
-  }
-
-  const date = new Date(2000, 0, 1, parts.hour, parts.minute, 0);
-  return date.toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function formatScheduleRange(start, end) {
-  const startLabel = formatScheduleTime(start);
-  const endLabel = formatScheduleTime(end);
-  if (startLabel === "—" && endLabel === "—") return "—";
-  return `${startLabel} - ${endLabel}`;
-}
-
-function getScheduleAgentMatchStatus(agent) {
-  return String(
-    agent?.matchStatus ||
-      agent?.["Name Match Status"] ||
-      agent?.nameMatchStatus ||
-      agent?.["Match Quality"] ||
-      agent?.matchQuality ||
-      ""
-  ).trim();
-}
-
-function needsNameMap(agent) {
-  return getScheduleAgentMatchStatus(agent).toLowerCase().includes("needs name map");
-}
-
-function getQueueVisibilityLabel(agent) {
-  if (needsNameMap(agent)) return "Cannot check yet";
-  if (agent?.seen === true) return "Visible in queue link";
-  if (agent?.seen === false) return "Not visible in queue snapshot";
-  return "Not checked";
-}
-
-function getQueueVisibilityClass(agent) {
-  if (needsNameMap(agent)) return "severity-medium";
-  if (agent?.seen === true) return "severity-low";
-  if (agent?.seen === false) return "severity-high";
-  return "severity-neutral";
-}
-
-function getNameMapInstruction(agent) {
-  const vendor = formatValue(agent?.vendor, "Vendor");
-  const agentId = formatValue(agent?.agentId, "Agent ID");
-  return `Add this in Schedule Name Map: Vendor=${vendor}, Agent ID=${agentId}, Queue Name Override=exact live queue agent name, Active=Yes.`;
 }
 
 function getSnapshotNumber(snapshot, key) {
@@ -450,7 +441,7 @@ function buildCoverageNeedStory(summary, snapshotStats, vendorMetrics) {
 
   if (topVendor?.Vendor && topVendor.Vendor !== "Unknown") {
     callCenterName = topVendor.Vendor;
-    callCenterMessage = `${topVendor.Vendor} is the strongest call-center signal in today’s saved vendor data.`;
+    callCenterMessage = `${topVendor.Vendor} is the strongest call-center signal in todayâ€™s saved vendor data.`;
   }
 
   let headline = "Coverage looks stable right now.";
@@ -523,111 +514,6 @@ function buildCallbackExposureStory(summary, snapshotStats, todaySnapshots, rece
     headline,
     meaning,
     recommendedFix,
-  };
-}
-
-
-
-function readCallerValue(row, keys, fallback = "") {
-  for (const key of keys) {
-    const value = row?.[key];
-    if (value !== undefined && value !== null && value !== "") return value;
-  }
-  return fallback;
-}
-
-function normalizePhoneForUi(value) {
-  return String(value || "").replace(/\D/g, "");
-}
-
-function maskPhoneForUi(value) {
-  const digits = normalizePhoneForUi(value);
-  if (!digits) return "—";
-  if (digits.length <= 4) return digits;
-  const last4 = digits.slice(-4);
-  if (digits.length === 10) return `***-***-${last4}`;
-  return `***${last4}`;
-}
-
-function normalizeCallerExposureRow(row, index, fallbackSummary = {}) {
-  const callerPhone = readCallerValue(row, ["Caller Phone", "caller", "Caller", "callerPhone"]);
-  const normalizedPhone = readCallerValue(row, ["Caller Phone Normalized", "callerPhoneNormalized", "normalizedPhone"]);
-  const maskedPhone = readCallerValue(row, ["Caller Phone Masked", "callerPhoneMasked", "maskedPhone"], maskPhoneForUi(normalizedPhone || callerPhone));
-  const durationSeconds = safeNumber(readCallerValue(row, ["Duration Seconds", "durationSeconds"], 0));
-  const callbackRisk = String(readCallerValue(row, ["Callback Risk", "callbackRisk"], durationSeconds >= 500 ? "Yes" : "No"));
-  const voicemailRisk = String(readCallerValue(row, ["Voicemail Risk", "voicemailRisk"], "No"));
-  const capturedAt = readCallerValue(row, ["Captured At", "capturedAt", "Checked At", "checkedAt"]);
-  const time = readCallerValue(row, ["Time", "time"], capturedAt);
-  const callsOnHold = safeNumber(readCallerValue(row, ["Calls On Hold", "callsOnHold"], fallbackSummary.callsOnHold || 0));
-  const agentsAvailable = safeNumber(readCallerValue(row, ["Agents Available", "agentsAvailable"], fallbackSummary.agentsAvailable || 0));
-
-  return {
-    id: `${readCallerValue(row, ["Snapshot ID", "snapshotId"], "snapshot")}-${readCallerValue(row, ["Call ID", "callId"], index)}-${index}`,
-    date: readCallerValue(row, ["Date", "date"]),
-    time,
-    capturedAt,
-    snapshotId: readCallerValue(row, ["Snapshot ID", "snapshotId"]),
-    callId: readCallerValue(row, ["Call ID", "callId"]),
-    callerPhone,
-    normalizedPhone: normalizePhoneForUi(normalizedPhone || callerPhone),
-    maskedPhone,
-    calledNumber: readCallerValue(row, ["Called Number", "Called", "calledNumber", "called"]),
-    durationSeconds,
-    duration: readCallerValue(row, ["Duration", "duration", "durationLabel"], secondsToClock(durationSeconds)),
-    callbackThreshold: safeNumber(readCallerValue(row, ["Callback Threshold Seconds", "callbackThreshold"], 500)),
-    callbackRisk,
-    voicemailThreshold: safeNumber(readCallerValue(row, ["Voicemail Threshold Seconds", "voicemailThreshold"], 1500)),
-    voicemailRisk,
-    agentName: readCallerValue(row, ["Agent Name", "agent", "agentName"]),
-    vendor: readCallerValue(row, ["Vendor", "vendor"], "Unknown"),
-    lastAction: readCallerValue(row, ["Last Action", "lastAction"]),
-    severity: readCallerValue(row, ["Severity", "severity"], callbackRisk.toLowerCase() === "yes" ? "High" : "Low"),
-    reasons: readCallerValue(row, ["Reasons", "reasons"]),
-    notes: readCallerValue(row, ["Notes", "notes"]),
-    callsOnHold,
-    agentsAvailable,
-    exposureType: readCallerValue(row, ["Exposure Type", "exposureType"], callbackRisk.toLowerCase() === "yes" ? "Callback-risk caller" : "Caller captured"),
-    matchKey: readCallerValue(row, ["Match Key", "matchKey"]),
-  };
-}
-
-function buildCallerExposureView(sheetRows, sheetSummary, liveRows, queueSummary) {
-  const sheetSource = Array.isArray(sheetRows) ? sheetRows : [];
-  const liveFallback = sheetSource.length
-    ? []
-    : (Array.isArray(liveRows) ? liveRows : []).filter((row) => normalizePhoneForUi(row?.caller || row?.Caller));
-
-  const sourceRows = sheetSource.length ? sheetSource : liveFallback;
-  const normalizedRows = sourceRows
-    .map((row, index) => normalizeCallerExposureRow(row, index, queueSummary))
-    .filter((row) => row.normalizedPhone)
-    .sort((a, b) => {
-      const aDate = new Date(a.capturedAt || a.time || 0);
-      const bDate = new Date(b.capturedAt || b.time || 0);
-      return bDate - aDate;
-    });
-
-  const uniqueCallers = new Set();
-  const callbackRiskCallers = new Set();
-  const voicemailRiskCallers = new Set();
-  let maxWaitSeconds = 0;
-
-  normalizedRows.forEach((row) => {
-    if (row.normalizedPhone) uniqueCallers.add(row.normalizedPhone);
-    if (String(row.callbackRisk).toLowerCase() === "yes") callbackRiskCallers.add(row.normalizedPhone);
-    if (String(row.voicemailRisk).toLowerCase() === "yes") voicemailRiskCallers.add(row.normalizedPhone);
-    maxWaitSeconds = Math.max(maxWaitSeconds, safeNumber(row.durationSeconds));
-  });
-
-  return {
-    rows: normalizedRows,
-    totalRows: safeNumber(sheetSummary?.rows, normalizedRows.length),
-    uniqueCallers: safeNumber(sheetSummary?.uniqueCallers, uniqueCallers.size),
-    callbackRiskCallers: safeNumber(sheetSummary?.callbackRiskCallers, callbackRiskCallers.size),
-    voicemailRiskCallers: safeNumber(sheetSummary?.voicemailRiskCallers, voicemailRiskCallers.size),
-    maxWaitSeconds: safeNumber(sheetSummary?.maxWaitSeconds, maxWaitSeconds),
-    maxWaitDuration: sheetSummary?.maxWaitDuration || secondsToClock(maxWaitSeconds),
-    source: sheetSource.length ? "Google Sheet: Caller Queue Exposure" : "Live queue fallback",
   };
 }
 
@@ -775,126 +661,6 @@ function StatDetailModal({ detail, onClose, onPrimaryAction }) {
   );
 }
 
-
-
-function CallerExposureModal({ open, onClose, data }) {
-  if (!open) return null;
-
-  const rows = Array.isArray(data?.rows) ? data.rows : [];
-
-  return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <section
-        className="caller-exposure-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Caller phone exposure details"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="flagged-modal-header">
-          <div>
-            <span>Caller phone exposure</span>
-            <h2>Caller numbers captured from the queue link</h2>
-            <p>
-              This card saves the caller phone numbers seen in the live queue so you can later
-              compare them against the Tableau callback report. It proves queue exposure by caller;
-              it does not claim the callback happened until Tableau confirms the same phone number.
-            </p>
-          </div>
-
-          <button type="button" className="modal-close-btn" onClick={onClose}>
-            <X size={22} />
-          </button>
-        </div>
-
-        <div className="caller-exposure-summary-grid">
-          <div>
-            <span>Unique caller numbers</span>
-            <strong>{data?.uniqueCallers || 0}</strong>
-            <small>Phone numbers captured today</small>
-          </div>
-          <div>
-            <span>Callback-risk callers</span>
-            <strong>{data?.callbackRiskCallers || 0}</strong>
-            <small>Callers that crossed the callback-risk wait threshold</small>
-          </div>
-          <div>
-            <span>Voicemail-risk callers</span>
-            <strong>{data?.voicemailRiskCallers || 0}</strong>
-            <small>Callers that crossed the voicemail-risk wait threshold</small>
-          </div>
-          <div>
-            <span>Longest wait</span>
-            <strong>{data?.maxWaitDuration || "0:00"}</strong>
-            <small>Longest caller wait captured today</small>
-          </div>
-        </div>
-
-        <div className="caller-exposure-note">
-          <strong>Simple use:</strong> export or compare these caller numbers against Tableau Callback Report.
-          If the same phone number appears later in Tableau, mark it as a confirmed callback match.
-        </div>
-
-        {rows.length === 0 ? (
-          <div className="flagged-modal-empty">
-            <PhoneCall size={34} />
-            <h3>No caller phone exposure saved yet.</h3>
-            <p>
-              Let Watchtower save one new queue snapshot after replacing Code.gs. The new tab should be
-              called Caller Queue Exposure.
-            </p>
-          </div>
-        ) : (
-          <div className="table-wrap caller-exposure-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Caller</th>
-                  <th>Call ID</th>
-                  <th>Wait</th>
-                  <th>Callback Risk</th>
-                  <th>Voicemail Risk</th>
-                  <th>Calls / Available</th>
-                  <th>Agent</th>
-                  <th>Vendor</th>
-                  <th>Last Action</th>
-                  <th>Exposure Type</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.slice(0, 250).map((row, index) => (
-                  <tr key={row.id || `${row.normalizedPhone}-${index}`}>
-                    <td>{formatSnapshotTime(row.capturedAt || row.time)}</td>
-                    <td className="strong-cell">{formatValue(row.maskedPhone)}</td>
-                    <td>{formatValue(row.callId)}</td>
-                    <td>{formatValue(row.duration)}</td>
-                    <td>
-                      <span className={`severity-badge ${String(row.callbackRisk).toLowerCase() === "yes" ? "severity-high" : "severity-low"}`}>
-                        {formatValue(row.callbackRisk)}
-                      </span>
-                    </td>
-                    <td>
-                      <span className={`severity-badge ${String(row.voicemailRisk).toLowerCase() === "yes" ? "severity-critical" : "severity-low"}`}>
-                        {formatValue(row.voicemailRisk)}
-                      </span>
-                    </td>
-                    <td>{row.callsOnHold} / {row.agentsAvailable}</td>
-                    <td>{formatValue(row.agentName)}</td>
-                    <td>{formatValue(row.vendor)}</td>
-                    <td>{formatValue(row.lastAction)}</td>
-                    <td className="evidence-cell">{formatValue(row.exposureType)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-    </div>
-  );
-}
-
 function FlaggedAgentsModal({ open, onClose, agents }) {
   if (!open) return null;
 
@@ -999,579 +765,30 @@ function FlaggedAgentsModal({ open, onClose, agents }) {
 }
 
 
-function getScheduleMetric(source, camelKey, sheetKey) {
-  return safeNumber(source?.[camelKey] ?? source?.[sheetKey] ?? 0);
-}
 
-function scheduleField(row, sheetKey, camelKey, fallback = "") {
-  return row?.[sheetKey] ?? row?.[camelKey] ?? fallback;
-}
+function CallerExposureModal({ open, onClose, rows, summary }) {
+  if (!open) return null;
 
-function normalizeScheduleStatus(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function agentNameKey(name) {
-  let raw = String(name || "").toLowerCase().trim();
-
-  try {
-    raw = raw.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  } catch (err) {}
-
-  raw = raw.replace(/[^a-z0-9, ]+/g, " ").replace(/\s+/g, " ").trim();
-
-  if (raw.includes(",")) {
-    const parts = raw.split(",").map((part) => part.trim()).filter(Boolean);
-    if (parts.length >= 2) raw = `${parts.slice(1).join(" ")} ${parts[0]}`;
-  }
-
-  return raw.replace(/\s+/g, " ").trim();
-}
-
-function agentTokenKey(name) {
-  return agentNameKey(name)
-    .split(" ")
-    .filter((part) => part.length > 1)
-    .sort()
-    .join("|");
-}
-
-function buildVisibleAgentMap(liveRows = [], liveAgentMetrics = []) {
-  const exact = new Set();
-  const token = new Set();
-
-  function add(name) {
-    const raw = String(name || "").trim();
-    if (!raw) return;
-    const exactKey = agentNameKey(raw);
-    const tokenKey = agentTokenKey(raw);
-    if (exactKey) exact.add(exactKey);
-    if (tokenKey) token.add(tokenKey);
-  }
-
-  liveRows.forEach((row) => add(row.agent || row["Agent Name"]));
-  liveAgentMetrics.forEach((agent) => add(agent.agent || agent["Agent Name"]));
-
-  return { exact, token };
-}
-
-function isAgentVisibleInQueue(name, visibleMap) {
-  const exactKey = agentNameKey(name);
-  const tokenKey = agentTokenKey(name);
-  return Boolean(visibleMap.exact.has(exactKey) || visibleMap.token.has(tokenKey));
-}
-
-function parseTimeParts(timeText) {
-  return parseScheduleTimeParts(timeText);
-}
-
-function dateTimeFromDateAndTime(dateKey, timeText) {
-  const parts = parseTimeParts(timeText);
-  if (!parts) return null;
-
-  const dateParts = String(dateKey || "").split("-").map(Number);
-  if (dateParts.length < 3 || dateParts.some((part) => Number.isNaN(part))) return null;
-
-  return new Date(dateParts[0], dateParts[1] - 1, dateParts[2], parts.hour, parts.minute, 0);
-}
-
-function isNowWithinWindow(dateKey, startText, endText, now = new Date(), graceMinutes = 0) {
-  const start = dateTimeFromDateAndTime(dateKey, startText);
-  const end = dateTimeFromDateAndTime(dateKey, endText);
-
-  if (!start || !end) return false;
-  if (end <= start) end.setDate(end.getDate() + 1);
-
-  const safeStart = new Date(start.getTime() + Number(graceMinutes || 0) * 60000);
-  return now >= safeStart && now <= end;
-}
-
-function getCurrentBreakWindow(schedule, now = new Date()) {
-  const dateKey = scheduleField(schedule, "Date", "date");
-  const windows = [
-    ["Break 1", scheduleField(schedule, "Break 1 Start", "break1Start"), scheduleField(schedule, "Break 1 End", "break1End")],
-    ["Lunch", scheduleField(schedule, "Lunch Start", "lunchStart"), scheduleField(schedule, "Lunch End", "lunchEnd")],
-    ["Break 2", scheduleField(schedule, "Break 2 Start", "break2Start"), scheduleField(schedule, "Break 2 End", "break2End")],
-  ];
-
-  for (const [label, startText, endText] of windows) {
-    if (!startText || !endText) continue;
-    if (isNowWithinWindow(dateKey, startText, endText, now, 0)) {
-      return `${label} ${startText} - ${endText}`;
-    }
-  }
-
-  return "";
-}
-
-function isScheduleRowWorkingNow(schedule, now = new Date()) {
-  const status = normalizeScheduleStatus(scheduleField(schedule, "Schedule Status", "scheduleStatus"));
-  if (status !== "scheduled") return false;
-
-  const dateKey = scheduleField(schedule, "Date", "date");
-  const start = scheduleField(schedule, "Scheduled Start", "scheduledStart");
-  const end = scheduleField(schedule, "Scheduled End", "scheduledEnd");
-
-  return isNowWithinWindow(dateKey, start, end, now, 10);
-}
-
-function buildScheduleCoverageFromImportedSchedules(schedulesToday, liveRows, liveAgentMetrics, now = new Date()) {
-  const visibleMap = buildVisibleAgentMap(liveRows, liveAgentMetrics);
-  const shouldBeWorkingAgents = [];
-  const exposedAgents = [];
-  const onBreakAgents = [];
-  const needsNameMapAgents = [];
-
-  (Array.isArray(schedulesToday) ? schedulesToday : []).forEach((schedule) => {
-    const vendor = scheduleField(schedule, "Vendor", "vendor", "Unknown");
-    const agentId = scheduleField(schedule, "Agent ID", "agentId", "");
-    const agentName = scheduleField(schedule, "Agent Name", "agentName", "");
-    const matchStatus = scheduleField(schedule, "Name Match Status", "nameMatchStatus", "Source Name");
-    const start = scheduleField(schedule, "Scheduled Start", "scheduledStart", "");
-    const end = scheduleField(schedule, "Scheduled End", "scheduledEnd", "");
-    const status = scheduleField(schedule, "Schedule Status", "scheduleStatus", "");
-
-    const needsMap = String(matchStatus).toLowerCase().includes("needs name map");
-    if (needsMap) {
-      needsNameMapAgents.push({
-        vendor,
-        agentId,
-        agentName,
-        start,
-        end,
-        status,
-        seen: null,
-        matchStatus,
-        source: schedule,
-        evidence:
-          "Cannot compare this schedule row to the live queue until the EDS/code is mapped to the exact queue agent name.",
-      });
-      return;
-    }
-
-    if (!isScheduleRowWorkingNow(schedule, now)) return;
-
-    const breakWindow = getCurrentBreakWindow(schedule, now);
-    if (breakWindow) {
-      onBreakAgents.push({ vendor, agentId, agentName, start, end, breakWindow, status, matchStatus, source: schedule });
-      return;
-    }
-
-    const seen = isAgentVisibleInQueue(agentName, visibleMap);
-    const item = {
-      vendor,
-      agentId,
-      agentName,
-      start,
-      end,
-      status,
-      seen,
-      matchStatus,
-      source: schedule,
-      evidence: seen
-        ? "Agent is scheduled now and was seen in the live queue snapshot."
-        : "Agent is scheduled now, not on break/lunch, and was not visible in the live queue snapshot.",
-    };
-
-    shouldBeWorkingAgents.push(item);
-    if (!seen) exposedAgents.push(item);
-  });
-
-  return {
-    shouldBeWorkingAgents,
-    exposedAgents,
-    onBreakAgents,
-    needsNameMapAgents,
-    scheduledNow: shouldBeWorkingAgents.length,
-    seenInQueue: shouldBeWorkingAgents.filter((agent) => agent.seen).length,
-    scheduledButNotSeen: exposedAgents.length,
-    onBreakLunch: onBreakAgents.length,
-    missingNameMap: needsNameMapAgents.length,
-  };
-}
-
-function isActiveScheduleFlag(flag) {
-  const resolved = String(flag?.Resolved || flag?.resolved || "No").toLowerCase();
-  if (resolved === "yes" || resolved === "resolved" || resolved === "true") return false;
-
-  const type = String(flag?.["Flag Type"] || flag?.flagType || "").toLowerCase();
-  return (
-    type.includes("coverage validation") ||
-    type.includes("scheduled during queue exposure") ||
-    type.includes("scheduled but not seen") ||
-    type.includes("scheduled not visible") ||
-    type.includes("schedule mismatch") ||
-    type.includes("not scheduled but seen") ||
-    type.includes("off but seen")
-  );
-}
-
-function buildScheduleSummary(coverage, flags, schedulesToday, importedCoverage, livePressure) {
-  const activeFlags = (Array.isArray(flags) ? flags : []).filter(isActiveScheduleFlag);
-  const scheduledButNotSeenFlags = activeFlags.filter((flag) => {
-    const type = String(flag["Flag Type"] || flag.flagType || "").toLowerCase();
-    return type.includes("coverage validation") ||
-      type.includes("scheduled during queue exposure") ||
-      type.includes("scheduled but not seen") ||
-      type.includes("scheduled not visible");
-  }).length;
-  const offButSeenFlags = activeFlags.filter((flag) => {
-    const type = String(flag["Flag Type"] || flag.flagType || "").toLowerCase();
-    return type.includes("schedule mismatch") || type.includes("not scheduled but seen") || type.includes("off but seen");
-  }).length;
-
-  const scheduledNow = Math.max(
-    getScheduleMetric(coverage, "scheduledNow", "Scheduled Now"),
-    safeNumber(importedCoverage?.scheduledNow)
-  );
-  const seenInQueue = Math.max(
-    getScheduleMetric(coverage, "seenInQueue", "Seen In Queue"),
-    safeNumber(importedCoverage?.seenInQueue)
-  );
-  const scheduledButNotSeen = Math.max(
-    getScheduleMetric(coverage, "scheduledButNotSeen", "Scheduled But Not Seen"),
-    safeNumber(importedCoverage?.scheduledButNotSeen),
-    scheduledButNotSeenFlags
-  );
-  const onBreakLunch = Math.max(
-    getScheduleMetric(coverage, "onBreakLunch", "On Break/Lunch"),
-    safeNumber(importedCoverage?.onBreakLunch)
-  );
-  const offButSeen = Math.max(
-    getScheduleMetric(coverage, "offButSeen", "Off But Seen"),
-    offButSeenFlags
-  );
-  const missingNameMap = Math.max(
-    getScheduleMetric(coverage, "missingNameMap", "Missing Name Map"),
-    safeNumber(importedCoverage?.missingNameMap)
-  );
-  const riskCount = Math.max(activeFlags.length, scheduledButNotSeen + offButSeen);
-  const callsOnHold = safeNumber(livePressure?.callsOnHold);
-  const agentsAvailable = safeNumber(livePressure?.agentsAvailable);
-  const exposedPhoneAgents = importedCoverage?.exposedAgents || [];
-
-  return {
-    scheduledNow,
-    seenInQueue,
-    scheduledButNotSeen,
-    onBreakLunch,
-    offButSeen,
-    missingNameMap,
-    riskCount,
-    phoneCoverageRisk: callsOnHold > 0 && exposedPhoneAgents.length > 0 ? exposedPhoneAgents.length : riskCount,
-    callsOnHold,
-    agentsAvailable,
-    importedRowsToday: schedulesToday.length,
-    flagsToday: activeFlags.length,
-    activeFlags,
-    shouldBeWorkingAgents: importedCoverage?.shouldBeWorkingAgents || [],
-    exposedAgents: exposedPhoneAgents,
-    onBreakAgents: importedCoverage?.onBreakAgents || [],
-    needsNameMapAgents: importedCoverage?.needsNameMapAgents || [],
-    checkedAt: coverage?.checkedAt || coverage?.["Checked At"] || "",
-    snapshotId: coverage?.snapshotId || coverage?.["Snapshot ID"] || "",
-    vendors: Array.isArray(coverage?.vendors) ? coverage.vendors : [],
-  };
-}
-
-
-
-const CALL_CENTER_CONFIGS = [
-  {
-    id: "buwelo-colombia",
-    label: "Buwelo Colombia",
-    shortLabel: "Buwelo-C",
-    className: "cc-buwelo-colombia",
-    helper: "Buwelo rows with C/Colombia identifiers are grouped here.",
-  },
-  {
-    id: "buwelo-ghana",
-    label: "Buwelo Ghana",
-    shortLabel: "Buwelo-G",
-    className: "cc-buwelo-ghana",
-    helper: "Buwelo rows with G/Ghana identifiers are grouped here.",
-  },
-  {
-    id: "telus",
-    label: "Telus",
-    shortLabel: "Telus",
-    className: "cc-telus",
-    helper: "Shows Telus schedule, queue, and flag data when imported or seen live.",
-  },
-  {
-    id: "wns",
-    label: "WNS",
-    shortLabel: "WNS",
-    className: "cc-wns",
-    helper: "Shows WNS Voice/Nesting coverage once WNS schedule data is connected.",
-  },
-  {
-    id: "tep",
-    label: "TEP",
-    shortLabel: "TEP",
-    className: "cc-tep",
-    helper: "Teleperformance schedule rows with real names should show here.",
-  },
-  {
-    id: "concentrix",
-    label: "Concentrix",
-    shortLabel: "Concentrix",
-    className: "cc-concentrix",
-    helper: "Shows Concentrix schedule, queue, and flag data when imported or seen live.",
-  },
-];
-
-function normalizeVendorText(value) {
-  return String(value || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function recordField(record, names, fallback = "") {
-  for (const name of names) {
-    const value = record?.[name];
-    if (value !== undefined && value !== null && value !== "") return value;
-  }
-  return fallback;
-}
-
-function getRecordVendor(record) {
-  return recordField(record, ["Vendor", "vendor"], "Unknown");
-}
-
-function getRecordAgentId(record) {
-  return String(recordField(record, ["Agent ID", "agentId", "agentID", "Ident", "ident"], "")).trim();
-}
-
-function getRecordAgentName(record) {
-  return recordField(record, ["Agent Name", "agentName", "agent", "Name", "name"], "Unknown Agent");
-}
-
-function getRecordCombinedText(record) {
-  return normalizeVendorText(
-    [
-      getRecordVendor(record),
-      getRecordAgentId(record),
-      getRecordAgentName(record),
-      recordField(record, ["Source Sheet", "sourceSheet"], ""),
-      recordField(record, ["Schedule Source", "scheduleSource"], ""),
-      recordField(record, ["Team Lead", "teamLead"], ""),
-      recordField(record, ["LOB", "lob"], ""),
-    ].join(" ")
-  );
-}
-
-function callCenterIdForRecord(record) {
-  const vendor = normalizeVendorText(getRecordVendor(record));
-  const agentId = getRecordAgentId(record).toUpperCase();
-  const text = getRecordCombinedText(record);
-
-  if (vendor.includes("teleperformance") || vendor === "tep" || text.includes(" tep ") || text.startsWith("tep ")) {
-    return "tep";
-  }
-  if (vendor.includes("wns") || text.includes(" wns ") || text.startsWith("wns ")) {
-    return "wns";
-  }
-  if (vendor.includes("telus") || text.includes(" telus ") || text.startsWith("telus ")) {
-    return "telus";
-  }
-  if (vendor.includes("concentrix") || text.includes(" concentrix ") || text.startsWith("concentrix ")) {
-    return "concentrix";
-  }
-  if (vendor.includes("buwelo") || text.includes("buwelo")) {
-    if (text.includes("ghana") || text.includes(" buwelo g") || text.includes("buwelo g ") || agentId.startsWith("G")) {
-      return "buwelo-ghana";
-    }
-    if (text.includes("colombia") || text.includes(" buwelo c") || text.includes("buwelo c ") || agentId.startsWith("C")) {
-      return "buwelo-colombia";
-    }
-
-    // Current Buwelo schedule rows are mostly C-style EDS rows. Until the source distinguishes
-    // Ghana vs Colombia, keep unsplit Buwelo rows under Colombia so they are not hidden.
-    return "buwelo-colombia";
-  }
-
-  return "other";
-}
-
-function belongsToCallCenter(record, callCenterId) {
-  return callCenterIdForRecord(record) === callCenterId;
-}
-
-function getCallCenterStatus(card) {
-  if (card.scheduledNotSeen > 0) return "Scheduled not visible";
-  if (card.offButSeen > 0) return "Off/leave visible";
-  if (card.needsNameMap > 0) return "Mapping needed";
-  if (card.scheduledNow > 0 && card.seenInQueue === card.scheduledNow) return "All scheduled visible";
-  if (card.totalRecords > 0) return "Rows loaded";
-  return "No data yet";
-}
-
-function getCallCenterCardTone(card) {
-  if (card.scheduledNotSeen > 0) return "has-critical-risk";
-  if (card.offButSeen > 0) return "has-medium-risk";
-  if (card.needsNameMap > 0) return "has-mapping-risk";
-  if (card.totalRecords > 0) return "has-data";
-  return "has-no-data";
-}
-
-function getFlagType(flag) {
-  return String(flag?.["Flag Type"] || flag?.flagType || "");
-}
-
-function getFlagRowType(flag) {
-  const type = getFlagType(flag).toLowerCase();
-  if (type.includes("scheduled but not seen")) return "Scheduled not visible";
-  if (type.includes("not scheduled but seen") || type.includes("off but seen")) return "Off/leave but seen";
-  return type ? getFlagType(flag) : "Saved schedule flag";
-}
-
-function makeCallCenterAgentRow(agent, rowType, evidenceOverride = "") {
-  return {
-    rowType,
-    vendor: agent.vendor || getRecordVendor(agent.source || agent),
-    agentName: agent.agentName || getRecordAgentName(agent.source || agent),
-    agentId: agent.agentId || getRecordAgentId(agent.source || agent),
-    start: agent.start || recordField(agent.source || agent, ["Scheduled Start", "scheduledStart"], ""),
-    end: agent.end || recordField(agent.source || agent, ["Scheduled End", "scheduledEnd"], ""),
-    status: agent.status || recordField(agent.source || agent, ["Schedule Status", "scheduleStatus"], ""),
-    queueVisibility:
-      agent.seen === true ? "Visible in queue link" : agent.seen === false ? "Not visible in queue snapshot" : "Cannot check yet",
-    matchStatus: agent.matchStatus || recordField(agent.source || agent, ["Name Match Status", "nameMatchStatus"], ""),
-    breakWindow: agent.breakWindow || "",
-    evidence: evidenceOverride || agent.evidence || "No evidence text saved yet.",
-  };
-}
-
-function makeCallCenterFlagRow(flag) {
-  return {
-    rowType: getFlagRowType(flag),
-    vendor: flag.Vendor || flag.vendor || "Unknown",
-    agentName: flag["Agent Name"] || flag.agentName || "Unknown Agent",
-    agentId: flag["Agent ID"] || flag.agentId || "",
-    start: flag["Scheduled Start"] || flag.scheduledStart || "",
-    end: flag["Scheduled End"] || flag.scheduledEnd || "",
-    status: flag["Expected Status"] || flag.expectedStatus || "",
-    queueVisibility: flag["Actual Status"] || flag.actualStatus || "",
-    matchStatus: flag["Match Quality"] || flag.matchQuality || "",
-    breakWindow: flag["Break/Lunch Window"] || flag.breakLunchWindow || "",
-    evidence: flag.Evidence || flag.evidence || "No evidence text saved yet.",
-  };
-}
-
-function buildCallCenterCards({
-  shouldBeWorkingAgents,
-  seenAgents,
-  exposedAgents,
-  onBreakAgents,
-  needsNameMapAgents,
-  visibleFlags,
-}) {
-  return CALL_CENTER_CONFIGS.map((config) => {
-    const shouldRows = shouldBeWorkingAgents.filter((row) => belongsToCallCenter(row.source || row, config.id));
-    const seenRows = seenAgents.filter((row) => belongsToCallCenter(row.source || row, config.id));
-    const exposedRows = exposedAgents.filter((row) => belongsToCallCenter(row.source || row, config.id));
-    const breakRows = onBreakAgents.filter((row) => belongsToCallCenter(row.source || row, config.id));
-    const mapRows = needsNameMapAgents.filter((row) => belongsToCallCenter(row.source || row, config.id));
-    const flagRows = visibleFlags.filter((row) => belongsToCallCenter(row, config.id));
-
-    const offButSeenRows = flagRows.filter((flag) => {
-      const type = getFlagType(flag).toLowerCase();
-      return type.includes("schedule mismatch") || type.includes("not scheduled but seen") || type.includes("off but seen");
-    });
-
-    const issueCount = exposedRows.length + offButSeenRows.length;
-    const blockerCount = mapRows.length;
-    const totalRecords = shouldRows.length + breakRows.length + mapRows.length + flagRows.length;
-
-    const detailRows = [
-      ...exposedRows.map((row) =>
-        makeCallCenterAgentRow(
-          row,
-          "Scheduled not visible",
-          "This agent is scheduled now, not in an imported break/lunch window, and was not found in the live queue snapshot. Validate login/availability with the vendor lead."
-        )
-      ),
-      ...offButSeenRows.map(makeCallCenterFlagRow),
-      ...seenRows.map((row) =>
-        makeCallCenterAgentRow(row, "Visible in queue link", "This agent is scheduled now and the agent name was found in the live queue snapshot. This confirms queue visibility, not exact availability status.")
-      ),
-      ...breakRows.map((row) =>
-        makeCallCenterAgentRow(row, "On break/lunch", "This agent is inside an imported break/lunch window. Do not treat as missing without validation.")
-      ),
-      ...mapRows.map((row) =>
-        makeCallCenterAgentRow(
-          row,
-          "Cannot match yet",
-          "This schedule row has an ID/code but not an exact queue-matchable agent name. Fill Schedule Name Map before treating this as missing."
-        )
-      ),
-    ];
-
-    return {
-      ...config,
-      scheduledNow: shouldRows.length,
-      seenInQueue: seenRows.length,
-      scheduledNotSeen: exposedRows.length,
-      onBreakLunch: breakRows.length,
-      offButSeen: offButSeenRows.length,
-      needsNameMap: blockerCount,
-      issueCount,
-      blockerCount,
-      totalRecords,
-      status: getCallCenterStatus({
-        scheduledNotSeen: exposedRows.length,
-        offButSeen: offButSeenRows.length,
-        needsNameMap: blockerCount,
-        scheduledNow: shouldRows.length,
-        seenInQueue: seenRows.length,
-        totalRecords,
-      }),
-      tone: getCallCenterCardTone({
-        scheduledNotSeen: exposedRows.length,
-        offButSeen: offButSeenRows.length,
-        needsNameMap: blockerCount,
-        totalRecords,
-      }),
-      detailRows,
-    };
-  });
-}
-
-function getCallCenterRowClass(rowType) {
-  const type = String(rowType || "").toLowerCase();
-  if (type.includes("scheduled not visible") || type.includes("scheduled not seen")) return "severity-high";
-  if (type.includes("off") || type.includes("mismatch")) return "severity-medium";
-  if (type.includes("name map") || type.includes("cannot")) return "severity-medium";
-  if (type.includes("seen")) return "severity-low";
-  if (type.includes("break") || type.includes("lunch")) return "severity-neutral";
-  return "severity-neutral";
-}
-
-function ScheduleExposureModal({ detail, onClose }) {
-  if (!detail) return null;
-
-  const rows = Array.isArray(detail.rows) ? detail.rows : [];
-  const mode = detail.mode || "agents";
+  const visibleRows = Array.isArray(rows) ? rows.slice(0, 500) : [];
+  const totals = buildCallerExposureSummary(rows, summary);
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <section
-        className="schedule-exposure-modal"
+        className="caller-exposure-modal"
         role="dialog"
         aria-modal="true"
-        aria-label={`${detail.title} details`}
+        aria-label="Caller exposure full phone numbers"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flagged-modal-header">
           <div>
-            <span>{detail.eyebrow || "Schedule coverage"}</span>
-            <h2>{detail.title}</h2>
-            <p>{detail.subtitle}</p>
+            <span>Caller exposure</span>
+            <h2>Full caller numbers captured from the live queue</h2>
+            <p>
+              These are the actual caller numbers Watchtower saved from the queue link. Use the
+              <strong> Full Caller Number</strong> column to compare against Tableau callback reports.
+            </p>
           </div>
 
           <button type="button" className="modal-close-btn" onClick={onClose}>
@@ -1579,173 +796,104 @@ function ScheduleExposureModal({ detail, onClose }) {
           </button>
         </div>
 
-        {detail.note ? <div className="schedule-modal-explain-box">{detail.note}</div> : null}
+        <div className="caller-exposure-note caller-exposure-full-note">
+          <strong>Important:</strong> this popup intentionally shows the full normalized caller
+          number, not the masked number, so you can match it against Tableau. The masked value can
+          still stay in Google Sheets for presentation views, but this view is for reconciliation.
+        </div>
 
-        <div className="schedule-modal-summary-row">
+        <div className="caller-exposure-summary-grid">
           <div>
-            <span>Total records</span>
-            <strong>{rows.length}</strong>
+            <span>Rows saved</span>
+            <strong>{totals.rows}</strong>
+            <small>Queue rows with a caller number.</small>
           </div>
+
           <div>
-            <span>Purpose</span>
-            <strong>{detail.purpose || "Investigation"}</strong>
+            <span>Unique full numbers</span>
+            <strong>{totals.uniqueCallers}</strong>
+            <small>Deduped caller numbers for Tableau matching.</small>
+          </div>
+
+          <div>
+            <span>Callback-risk numbers</span>
+            <strong>{totals.callbackRiskCallers}</strong>
+            <small>Caller numbers that crossed callback threshold.</small>
+          </div>
+
+          <div>
+            <span>Voicemail-risk numbers</span>
+            <strong>{totals.voicemailRiskCallers}</strong>
+            <small>Caller numbers that crossed voicemail threshold.</small>
+          </div>
+
+          <div>
+            <span>Longest wait</span>
+            <strong>{totals.maxWaitDuration}</strong>
+            <small>Highest wait captured today.</small>
           </div>
         </div>
 
-        {rows.length === 0 ? (
+        {visibleRows.length === 0 ? (
           <div className="flagged-modal-empty">
-            <Eye size={34} />
-            <h3>No records found for this card.</h3>
-            <p>{detail.emptyText || "There is no saved data behind this schedule card yet."}</p>
-          </div>
-        ) : mode === "callCenter" ? (
-          <div className="table-wrap schedule-modal-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Result</th>
-                  <th>Vendor</th>
-                  <th>Agent</th>
-                  <th>Agent ID</th>
-                  <th>Scheduled shift</th>
-                  <th>Queue visibility</th>
-                  <th>Break/Lunch</th>
-                  <th>Match</th>
-                  <th>Evidence / Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row, index) => (
-                  <tr key={`${row.vendor}-${row.agentId || row.agentName}-${row.rowType}-${index}`}>
-                    <td>
-                      <span className={`severity-badge ${getCallCenterRowClass(row.rowType)}`}>
-                        {formatValue(row.rowType)}
-                      </span>
-                    </td>
-                    <td>{formatValue(row.vendor)}</td>
-                    <td className="strong-cell">{formatValue(row.agentName)}</td>
-                    <td>{formatValue(row.agentId)}</td>
-                    <td>{formatScheduleRange(row.start, row.end)}</td>
-                    <td>{formatValue(row.queueVisibility)}</td>
-                    <td>{formatValue(row.breakWindow)}</td>
-                    <td>{formatValue(row.matchStatus)}</td>
-                    <td className="evidence-cell">{formatValue(row.evidence)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : mode === "nameMap" ? (
-          <div className="table-wrap schedule-modal-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Vendor</th>
-                  <th>EDS / Agent ID</th>
-                  <th>Schedule placeholder</th>
-                  <th>Scheduled shift</th>
-                  <th>Status</th>
-                  <th>Match problem</th>
-                  <th>What to do</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((agent, index) => (
-                  <tr key={`${agent.vendor}-${agent.agentId || agent.agentName}-${index}`}>
-                    <td>{formatValue(agent.vendor)}</td>
-                    <td className="strong-cell">{formatValue(agent.agentId)}</td>
-                    <td>{formatValue(agent.agentName)}</td>
-                    <td>{formatScheduleRange(agent.start, agent.end)}</td>
-                    <td>{formatValue(agent.status)}</td>
-                    <td>
-                      <span className="severity-badge severity-medium">Needs Name Map</span>
-                    </td>
-                    <td className="evidence-cell">{getNameMapInstruction(agent)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : mode === "flags" ? (
-          <div className="table-wrap schedule-modal-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Checked</th>
-                  <th>Vendor</th>
-                  <th>Agent</th>
-                  <th>Agent ID</th>
-                  <th>Finding</th>
-                  <th>Expected</th>
-                  <th>Actual</th>
-                  <th>Calls / Available</th>
-                  <th>Schedule</th>
-                  <th>Reason</th>
-                  <th>Evidence</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((flag, index) => (
-                  <tr key={`${flag["Snapshot ID"] || "snapshot"}-${flag["Agent ID"] || index}-${index}`}>
-                    <td>{formatSnapshotTime(flag["Checked At"] || flag.checkedAt)}</td>
-                    <td>{formatValue(flag.Vendor || flag.vendor)}</td>
-                    <td className="strong-cell">{formatValue(flag["Agent Name"] || flag.agentName)}</td>
-                    <td>{formatValue(flag["Agent ID"] || flag.agentId)}</td>
-                    <td>
-                      <span className={`severity-badge ${severityClass(flag.Severity || flag.severity)}`}>
-                        {formatValue(flag["Flag Type"] || flag.flagType)}
-                      </span>
-                    </td>
-                    <td>{formatValue(flag["Expected Status"] || flag.expectedStatus)}</td>
-                    <td>{formatValue(flag["Actual Status"] || flag.actualStatus)}</td>
-                    <td>{formatValue(flag["Calls On Hold"] || flag.callsOnHold, 0)} / {formatValue(flag["Agents Available"] || flag.agentsAvailable, 0)}</td>
-                    <td>
-                      {formatScheduleRange(
-                        flag["Scheduled Start"] || flag.scheduledStart,
-                        flag["Scheduled End"] || flag.scheduledEnd
-                      )}
-                    </td>
-                    <td>{formatValue(flag["Watchtower Reason"] || flag.watchtowerReason, "Cannot determine from schedules + queue link")}</td>
-                    <td className="evidence-cell">{formatValue(flag.Evidence || flag.evidence)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <PhoneCall size={34} />
+            <h3>No caller exposure rows loaded yet.</h3>
+            <p>
+              Run setupWorkbook in Apps Script, redeploy the web app, then let Watchtower save a new
+              queue snapshot. The Caller Queue Exposure tab should populate after the next snapshot.
+            </p>
           </div>
         ) : (
-          <div className="table-wrap schedule-modal-table-wrap">
+          <div className="table-wrap caller-exposure-table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Vendor</th>
+                  <th>Time</th>
+                  <th>Full Caller Number</th>
+                  <th>Raw Caller</th>
+                  <th>Called Number</th>
+                  <th>Call ID</th>
+                  <th>Wait</th>
+                  <th>Callback Risk</th>
+                  <th>Voicemail Risk</th>
+                  <th>Calls / Available</th>
                   <th>Agent</th>
-                  <th>Agent ID</th>
-                  <th>Scheduled shift</th>
-                  <th>Schedule status</th>
-                  <th>Queue visibility</th>
-                  <th>Break/Lunch</th>
-                  <th>Match status</th>
-                  <th>Evidence</th>
+                  <th>Vendor</th>
+                  <th>Last Action</th>
+                  <th>Exposure Type</th>
                 </tr>
               </thead>
+
               <tbody>
-                {rows.map((agent, index) => (
-                  <tr key={`${agent.vendor}-${agent.agentId || agent.agentName}-${index}`}>
-                    <td>{formatValue(agent.vendor)}</td>
-                    <td className="strong-cell">{formatValue(agent.agentName)}</td>
-                    <td>{formatValue(agent.agentId)}</td>
-                    <td>{formatScheduleRange(agent.start, agent.end)}</td>
-                    <td>{formatValue(agent.status)}</td>
-                    <td>
-                      <span className={`severity-badge ${getQueueVisibilityClass(agent)}`}>
-                        {getQueueVisibilityLabel(agent)}
-                      </span>
-                    </td>
-                    <td>{formatValue(agent.breakWindow)}</td>
-                    <td>{formatValue(agent.matchStatus)}</td>
-                    <td className="evidence-cell">{formatValue(agent.evidence)}</td>
-                  </tr>
-                ))}
+                {visibleRows.map((row, index) => {
+                  const fullPhone = getCallerFullPhone(row);
+                  const rawPhone = getCallerRawPhone(row);
+                  const calledNumber =
+                    row["Called Number"] || row.calledNumber || row.Called || row.called || "—";
+                  const callbackRisk = row["Callback Risk"] || row.callbackRisk || "No";
+                  const voicemailRisk = row["Voicemail Risk"] || row.voicemailRisk || "No";
+
+                  return (
+                    <tr key={`${fullPhone}-${row["Call ID"] || row.callId || index}-${index}`}>
+                      <td>{formatSnapshotTime(row.Time || row.time || row["Captured At"])}</td>
+                      <td className="strong-cell caller-full-phone">{fullPhone}</td>
+                      <td className="caller-raw-phone">{formatValue(rawPhone)}</td>
+                      <td>{formatValue(calledNumber)}</td>
+                      <td>{formatValue(row["Call ID"] || row.callId)}</td>
+                      <td>{formatValue(getCallerWaitLabel(row))}</td>
+                      <td>{yesNoBadge(callbackRisk)}</td>
+                      <td>{yesNoBadge(voicemailRisk)}</td>
+                      <td>
+                        {safeNumber(row["Calls On Hold"] || row.callsOnHold)} /{" "}
+                        {safeNumber(row["Agents Available"] || row.agentsAvailable)}
+                      </td>
+                      <td>{formatValue(row["Agent Name"] || row.agentName || row.agent)}</td>
+                      <td>{formatValue(row.Vendor || row.vendor)}</td>
+                      <td>{formatValue(row["Last Action"] || row.lastAction)}</td>
+                      <td>{formatValue(row["Exposure Type"] || row.exposureType)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1755,429 +903,126 @@ function ScheduleExposureModal({ detail, onClose }) {
   );
 }
 
+function getScheduleMetric(source, camelKey, sheetKey) {
+  return safeNumber(source?.[camelKey] ?? source?.[sheetKey] ?? 0);
+}
+
+function buildScheduleSummary(coverage, flags, schedulesToday) {
+  const scheduledNow = getScheduleMetric(coverage, "scheduledNow", "Scheduled Now");
+  const seenInQueue = getScheduleMetric(coverage, "seenInQueue", "Seen In Queue");
+  const scheduledButNotSeen = getScheduleMetric(
+    coverage,
+    "scheduledButNotSeen",
+    "Scheduled But Not Seen"
+  );
+  const onBreakLunch = getScheduleMetric(coverage, "onBreakLunch", "On Break/Lunch");
+  const offButSeen = getScheduleMetric(coverage, "offButSeen", "Off But Seen");
+  const missingNameMap = getScheduleMetric(coverage, "missingNameMap", "Missing Name Map");
+  const riskCount = scheduledButNotSeen + offButSeen;
+
+  return {
+    scheduledNow,
+    seenInQueue,
+    scheduledButNotSeen,
+    onBreakLunch,
+    offButSeen,
+    missingNameMap,
+    riskCount,
+    importedRowsToday: schedulesToday.length,
+    flagsToday: flags.length,
+    checkedAt: coverage?.checkedAt || coverage?.["Checked At"] || "",
+    snapshotId: coverage?.snapshotId || coverage?.["Snapshot ID"] || "",
+    vendors: Array.isArray(coverage?.vendors) ? coverage.vendors : [],
+  };
+}
+
 function ScheduleAdherenceSection({ summary, flags }) {
-  const [scheduleDetail, setScheduleDetail] = useState(null);
-
-  const visibleFlags = Array.isArray(summary.activeFlags) ? summary.activeFlags.slice(0, 100) : [];
-  const exposedAgents = Array.isArray(summary.exposedAgents) ? summary.exposedAgents : [];
-  const shouldBeWorkingAgents = Array.isArray(summary.shouldBeWorkingAgents)
-    ? summary.shouldBeWorkingAgents
-    : [];
-  const seenAgents = shouldBeWorkingAgents.filter((agent) => agent.seen);
-  const onBreakAgents = Array.isArray(summary.onBreakAgents) ? summary.onBreakAgents : [];
-  const needsNameMapAgents = Array.isArray(summary.needsNameMapAgents)
-    ? summary.needsNameMapAgents
-    : [];
-
-  const queueExposureActive = Number(summary.callsOnHold || 0) > 0;
-  const scheduledDuringExposure = queueExposureActive ? shouldBeWorkingAgents : [];
-  const visibleDuringExposure = queueExposureActive ? seenAgents : [];
-  const notVisibleDuringExposure = queueExposureActive ? exposedAgents : [];
-
-  const scheduledButNotSeenFlags = visibleFlags.filter((flag) => {
-    const type = String(flag["Flag Type"] || flag.flagType || "").toLowerCase();
-    return type.includes("coverage validation") ||
-      type.includes("scheduled during queue exposure") ||
-      type.includes("scheduled but not seen") ||
-      type.includes("scheduled not visible");
-  });
-
-  const offButSeenFlags = visibleFlags.filter((flag) => {
-    const type = String(flag["Flag Type"] || flag.flagType || "").toLowerCase();
-    return type.includes("schedule mismatch") || type.includes("not scheduled but seen") || type.includes("off but seen");
-  });
-
-  const callCenterCards = useMemo(() => {
-    return buildCallCenterCards({
-      shouldBeWorkingAgents: scheduledDuringExposure,
-      seenAgents: visibleDuringExposure,
-      exposedAgents: notVisibleDuringExposure,
-      onBreakAgents,
-      needsNameMapAgents,
-      visibleFlags,
-    });
-  }, [shouldBeWorkingAgents, seenAgents, exposedAgents, onBreakAgents, needsNameMapAgents, visibleFlags]);
-
-  const openAgentModal = (title, subtitle, rows, purpose, emptyText, mode = "agents", note = "") => {
-    setScheduleDetail({
-      title,
-      subtitle,
-      rows,
-      purpose,
-      emptyText,
-      mode,
-      note,
-    });
-  };
-
-  const openFlagModal = (title, subtitle, rows, purpose, emptyText) => {
-    setScheduleDetail({
-      title,
-      subtitle,
-      rows,
-      purpose,
-      emptyText,
-      mode: "flags",
-    });
-  };
+  const visibleFlags = Array.isArray(flags) ? flags.slice(0, 10) : [];
 
   return (
-    <section className="schedule-adherence-panel phone-exposure-panel">
+    <section className="schedule-adherence-panel">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">Agent Utilization</span>
-          <h2>Coverage validation from schedules + queue link</h2>
+          <span className="eyebrow">Schedule Adherence</span>
+          <h2>June Voice / Customer Service coverage check</h2>
           <p>
-            Watchtower keeps this simple: it shows the queue pressure, who was scheduled during that same time,
-            and whether their name appeared in the queue link. The tool does not guess why an agent did not answer.
+            Watchtower compares the imported TEP, Buwelo, and WNS June schedules against the live
+            queue snapshot. Treat “not seen” as an investigation flag until live login status is confirmed.
           </p>
-          <div className="schedule-meaning-note">
-            <strong>Boss-facing meaning:</strong> If calls were waiting, these are the scheduled agents/vendors that need live-status confirmation.
-            Reason shown by Watchtower: cannot determine from schedules + queue link. Vendor must confirm available, on call, AUX/not ready, break, lunch, logged out, or assigned to another queue.
-          </div>
         </div>
       </div>
 
-      <button
-        type="button"
-        className="phone-exposure-alert phone-exposure-alert-button"
-        onClick={() =>
-          openAgentModal(
-            "Coverage validation needed",
-            "These rows show scheduled agents during a queue exposure moment. The queue link cannot prove the reason, so vendor live-status confirmation is required.",
-            notVisibleDuringExposure,
-            "Vendor status needed",
-            "No current queue exposure validation rows are found. If calls are not waiting right now, this card stays clean."
-          )
-        }
-      >
+      <div className="schedule-kpi-grid">
         <div>
-          <span>Current queue exposure</span>
-          <strong>{summary.callsOnHold} calls on hold · {summary.agentsAvailable} agents available</strong>
-          <p>
-            {notVisibleDuringExposure.length > 0
-              ? `${notVisibleDuringExposure.length} scheduled agents need vendor status confirmation. Click to review the validation list.`
-              : summary.missingNameMap > 0
-                ? `${summary.missingNameMap} schedule rows cannot be checked yet because they need ID-to-name mapping. Click Cannot Match Yet to fix the match.`
-                : "No current queue exposure validation issue is showing. Click to inspect the backing list."}
-          </p>
-        </div>
-      </button>
-
-      <div className="call-center-coverage-section">
-        <div className="story-table-title">
-          <h3>Call center utilization validation by vendor</h3>
-          <span>Click any card to see who needs status confirmation and what data is missing</span>
-        </div>
-
-        <div className="call-center-coverage-grid">
-          {callCenterCards.map((card) => (
-            <button
-              type="button"
-              className={`call-center-coverage-card ${card.className} ${card.tone}`}
-              key={card.id}
-              onClick={() =>
-                setScheduleDetail({
-                  eyebrow: "Call center coverage",
-                  title: `${card.label} — utilization validation`,
-                  subtitle:
-                    card.totalRecords > 0
-                      ? "This popup shows rows behind this vendor card: scheduled during queue exposure, visible/not visible in the queue link, break/lunch rows, schedule mismatches, and mapping blockers."
-                      : "No schedule or queue rows are connected to this call center yet.",
-                  rows: card.detailRows,
-                  purpose: card.status,
-                  emptyText:
-                    "No imported schedule rows or saved schedule flags were found for this call center. Add/import that call center schedule first, then let Watchtower save a new snapshot.",
-                  mode: "callCenter",
-                  note:
-                    card.needsNameMap > 0
-                      ? `${card.needsNameMap} row(s) need name mapping before Watchtower can safely judge them as visible or not visible.`
-                      : card.scheduledNotSeen > 0
-                        ? `${card.scheduledNotSeen} scheduled agent(s) were not visible in the live queue snapshot. Validate live status before coaching.`
-                        : card.totalRecords > 0
-                          ? "No scheduled-not-visible exposure is showing from the rows currently loaded for this call center."
-                          : card.helper,
-                })
-              }
-            >
-              <div className="call-center-card-topline">
-                <span>{card.shortLabel}</span>
-                <b>{card.status}</b>
-              </div>
-
-              <strong className="call-center-card-name">{card.label}</strong>
-
-              <div className="call-center-card-main-number">
-                <span>Review Items</span>
-                <strong>{card.issueCount}</strong>
-              </div>
-
-              <div className="call-center-mini-grid">
-                <div>
-                  <span>Scheduled</span>
-                  <b>{card.scheduledNow}</b>
-                </div>
-                <div>
-                  <span>Visible</span>
-                  <b>{card.seenInQueue}</b>
-                </div>
-                <div>
-                  <span>Validate</span>
-                  <b>{card.scheduledNotSeen}</b>
-                </div>
-                <div>
-                  <span>Map Needed</span>
-                  <b>{card.needsNameMap}</b>
-                </div>
-              </div>
-
-              <small>Click to see all rows</small>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="schedule-kpi-grid phone-schedule-kpi-grid">
-        <button
-          type="button"
-          className="schedule-kpi-tile"
-          onClick={() =>
-            openAgentModal(
-              "Agents scheduled during current queue check",
-              "These agents are inside the scheduled shift window. If calls are waiting, this is the pool to validate with the vendor.",
-              shouldBeWorkingAgents,
-              "Scheduled coverage pool",
-              "No scheduled agents are inside the current shift window. Check Agent Schedules, schedule date, and timezone."
-            )
-          }
-        >
-          <span>Scheduled During Check</span>
+          <span>Scheduled now</span>
           <strong>{summary.scheduledNow}</strong>
-          <small>Click to expose</small>
-        </button>
-
-        <button
-          type="button"
-          className="schedule-kpi-tile"
-          onClick={() =>
-            openAgentModal(
-              "Scheduled agents visible in queue link",
-              "These scheduled agents had their names appear in the queue link. The queue link still does not prove if they were available, busy, or on another call.",
-              seenAgents,
-              "Visible in queue link",
-              "No scheduled agents were visible in the current queue snapshot."
-            )
-          }
-        >
-          <span>Visible in Queue Link</span>
+        </div>
+        <div>
+          <span>Seen in queue</span>
           <strong>{summary.seenInQueue}</strong>
-          <small>Click to expose</small>
-        </button>
-
-        <button
-          type="button"
-          className={`schedule-kpi-tile ${summary.scheduledButNotSeen > 0 ? "schedule-risk-kpi" : ""}`}
-          onClick={() =>
-            openAgentModal(
-              "Needs vendor status confirmation",
-              "These scheduled agents were not visible in the queue link during a queue exposure moment. The reason cannot be proven from schedules + queue link alone.",
-              notVisibleDuringExposure,
-              "Vendor status needed",
-              "No current queue exposure validation rows are found."
-            )
-          }
-        >
-          <span>Needs Vendor Status</span>
+        </div>
+        <div className={summary.scheduledButNotSeen > 0 ? "schedule-risk-kpi" : ""}>
+          <span>Scheduled but not seen</span>
           <strong>{summary.scheduledButNotSeen}</strong>
-          <small>Click to expose</small>
-        </button>
-
-        <button
-          type="button"
-          className="schedule-kpi-tile"
-          onClick={() =>
-            openAgentModal(
-              "Agents inside scheduled break/lunch windows",
-              "These agents are scheduled now but currently fall inside imported break/lunch windows, so they should not be treated as missing without validation.",
-              onBreakAgents,
-              "Protected break/lunch",
-              "No imported break/lunch windows are active right now."
-            )
-          }
-        >
-          <span>Scheduled Break/Lunch</span>
+        </div>
+        <div>
+          <span>On break/lunch</span>
           <strong>{summary.onBreakLunch}</strong>
-          <small>Click to expose</small>
-        </button>
-
-        <button
-          type="button"
-          className={`schedule-kpi-tile ${summary.offButSeen > 0 ? "schedule-risk-kpi" : ""}`}
-          onClick={() =>
-            openFlagModal(
-              "Agents marked off/leave but visible in queue",
-              "These saved flags show agents whose imported schedule said Off/Leave, but the queue snapshot showed their name as visible.",
-              offButSeenFlags,
-              "Off/leave visibility mismatch",
-              "No off/leave-but-visible flags are saved for today."
-            )
-          }
-        >
-          <span>Off/Leave But Visible</span>
+        </div>
+        <div className={summary.offButSeen > 0 ? "schedule-risk-kpi" : ""}>
+          <span>Off but seen</span>
           <strong>{summary.offButSeen}</strong>
-          <small>Click to expose</small>
-        </button>
-
-        <button
-          type="button"
-          className={`schedule-kpi-tile ${summary.missingNameMap > 0 ? "schedule-warning-kpi" : ""}`}
-          onClick={() =>
-            openAgentModal(
-              "Schedule rows that cannot be matched yet",
-              "These rows are not counted as visible or not visible yet. They must be mapped first because the schedule only shows an ID/code, not the exact agent name from the live queue.",
-              needsNameMapAgents,
-              "Map schedule IDs to queue names",
-              "No schedule rows need name mapping right now.",
-              "nameMap",
-              "Do not treat these rows as missing yet. Fill the Schedule Name Map tab so Watchtower can compare schedule IDs/codes to the real live queue agent names."
-            )
-          }
-        >
-          <span>Cannot Match Yet</span>
+        </div>
+        <div>
+          <span>Needs name map</span>
           <strong>{summary.missingNameMap}</strong>
-          <small>Click to expose</small>
-        </button>
+        </div>
       </div>
 
-      {notVisibleDuringExposure.length > 0 ? (
-        <div className="phone-exposure-list">
-          <div className="story-table-title">
-            <h3>Priority list: scheduled during queue exposure — reason needs vendor status</h3>
-            <span>{notVisibleDuringExposure.length} agents</span>
-          </div>
-          <div className="table-wrap schedule-flags-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Vendor</th>
-                  <th>Agent</th>
-                  <th>Agent ID</th>
-                  <th>Scheduled</th>
-                  <th>Watchtower Finding</th>
-                  <th>Reason</th>
-                  <th>Evidence</th>
-                </tr>
-              </thead>
-              <tbody>
-                {notVisibleDuringExposure.slice(0, 100).map((agent, index) => (
-                  <tr key={`${agent.vendor}-${agent.agentId || agent.agentName}-${index}`}>
-                    <td>{formatValue(agent.vendor)}</td>
-                    <td className="strong-cell">{formatValue(agent.agentName)}</td>
-                    <td>{formatValue(agent.agentId)}</td>
-                    <td>{formatScheduleRange(agent.start, agent.end)}</td>
-                    <td>
-                      <span className="severity-badge severity-high">Needs Vendor Status</span>
-                    </td>
-                    <td>Cannot determine from schedules + queue link</td>
-                    <td className="evidence-cell">{agent.evidence}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ) : shouldBeWorkingAgents.length > 0 ? (
-        <div className="phone-exposure-list">
-          <div className="story-table-title">
-            <h3>Scheduled coverage checked now</h3>
-            <span>{shouldBeWorkingAgents.length} scheduled agents checked</span>
-          </div>
-          <div className="table-wrap schedule-flags-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Vendor</th>
-                  <th>Agent</th>
-                  <th>Agent ID</th>
-                  <th>Scheduled</th>
-                  <th>Queue visibility</th>
-                </tr>
-              </thead>
-              <tbody>
-                {shouldBeWorkingAgents.slice(0, 60).map((agent, index) => (
-                  <tr key={`${agent.vendor}-${agent.agentId || agent.agentName}-${index}`}>
-                    <td>{formatValue(agent.vendor)}</td>
-                    <td className="strong-cell">{formatValue(agent.agentName)}</td>
-                    <td>{formatValue(agent.agentId)}</td>
-                    <td>{formatScheduleRange(agent.start, agent.end)}</td>
-                    <td>
-                      <span className={`severity-badge ${getQueueVisibilityClass(agent)}`}>
-                        {getQueueVisibilityLabel(agent)}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ) : (
+      {visibleFlags.length === 0 ? (
         <EmptyState
-          title="No scheduled coverage rows found for the current time."
-          text="This can happen outside the imported shift windows, or when the schedule date/time does not match the live snapshot. Check Agent Schedules and the current timezone."
+          title="No schedule flags loaded yet."
+          text="Import June schedules in Apps Script, then let Watchtower save a new queue snapshot."
         />
-      )}
+      ) : (
+        <div className="table-wrap schedule-flags-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Checked</th>
+                <th>Vendor</th>
+                <th>Agent</th>
+                <th>Flag</th>
+                <th>Expected</th>
+                <th>Actual</th>
+                <th>Schedule</th>
+                <th>Evidence</th>
+              </tr>
+            </thead>
 
-      {visibleFlags.length > 0 ? (
-        <div className="phone-exposure-list">
-          <div className="story-table-title">
-            <h3>All coverage validation rows saved today</h3>
-            <span>{visibleFlags.length} flags</span>
-          </div>
-          <div className="table-wrap schedule-flags-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Checked</th>
-                  <th>Vendor</th>
-                  <th>Agent</th>
-                  <th>Flag</th>
-                  <th>Expected</th>
-                  <th>Actual</th>
-                  <th>Schedule</th>
-                  <th>Evidence</th>
+            <tbody>
+              {visibleFlags.map((flag, index) => (
+                <tr key={`${flag["Agent Name"] || flag.agentName}-${index}`}>
+                  <td>{formatSnapshotTime(flag["Checked At"] || flag.checkedAt)}</td>
+                  <td>{formatValue(flag.Vendor || flag.vendor)}</td>
+                  <td className="strong-cell">{formatValue(flag["Agent Name"] || flag.agentName)}</td>
+                  <td>
+                    <span className={`severity-badge ${severityClass(flag.Severity || flag.severity)}`}>
+                      {formatValue(flag["Flag Type"] || flag.flagType)}
+                    </span>
+                  </td>
+                  <td>{formatValue(flag["Expected Status"] || flag.expectedStatus)}</td>
+                  <td>{formatValue(flag["Actual Status"] || flag.actualStatus)}</td>
+                  <td>
+                    {formatValue(flag["Scheduled Start"] || flag.scheduledStart)} - {formatValue(flag["Scheduled End"] || flag.scheduledEnd)}
+                  </td>
+                  <td className="evidence-cell">{formatValue(flag.Evidence || flag.evidence)}</td>
                 </tr>
-              </thead>
-
-              <tbody>
-                {visibleFlags.map((flag, index) => (
-                  <tr key={`${flag["Snapshot ID"] || "snapshot"}-${flag["Agent ID"] || index}-${index}`}>
-                    <td>{formatSnapshotTime(flag["Checked At"] || flag.checkedAt)}</td>
-                    <td>{formatValue(flag.Vendor || flag.vendor)}</td>
-                    <td className="strong-cell">{formatValue(flag["Agent Name"] || flag.agentName)}</td>
-                    <td>
-                      <span className={`severity-badge ${severityClass(flag.Severity || flag.severity)}`}>
-                        {formatValue(flag["Flag Type"] || flag.flagType)}
-                      </span>
-                    </td>
-                    <td>{formatValue(flag["Expected Status"] || flag.expectedStatus)}</td>
-                    <td>{formatValue(flag["Actual Status"] || flag.actualStatus)}</td>
-                    <td>
-                      {formatScheduleRange(
-                        flag["Scheduled Start"] || flag.scheduledStart,
-                        flag["Scheduled End"] || flag.scheduledEnd
-                      )}
-                    </td>
-                    <td className="evidence-cell">{formatValue(flag.Evidence || flag.evidence)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+              ))}
+            </tbody>
+          </table>
         </div>
-      ) : null}
-
-      <ScheduleExposureModal detail={scheduleDetail} onClose={() => setScheduleDetail(null)} />
+      )}
     </section>
   );
 }
@@ -2191,8 +1036,8 @@ function App() {
   const [lastLoaded, setLastLoaded] = useState("");
   const [error, setError] = useState("");
   const [flaggedModalOpen, setFlaggedModalOpen] = useState(false);
+  const [callerExposureOpen, setCallerExposureOpen] = useState(false);
   const [statDetail, setStatDetail] = useState(null);
-  const [callerExposureModalOpen, setCallerExposureModalOpen] = useState(false);
 
   async function loadDashboard() {
     try {
@@ -2265,39 +1110,17 @@ function App() {
   const scheduleCoverageLatest = sheet.scheduleCoverageLatest || {};
   const schedulesToday = sheet.schedulesToday || [];
   const callerExposureToday = sheet.callerExposureToday || [];
-  const callerExposureSummary = sheet.callerExposureSummary || {};
+  const callerExposureSummary = buildCallerExposureSummary(
+    callerExposureToday,
+    sheet.callerExposureSummary || {}
+  );
   const liveRows = live.rows || [];
   const cardsAreLoading = loading || refreshing;
   const liveAgentMetrics = live.agentMetrics || [];
 
-  const importedScheduleCoverage = useMemo(() => {
-    return buildScheduleCoverageFromImportedSchedules(
-      schedulesToday,
-      liveRows,
-      liveAgentMetrics,
-      new Date()
-    );
-  }, [schedulesToday, liveRows, liveAgentMetrics]);
-
   const scheduleSummary = useMemo(() => {
-    const callsOnHold =
-      safeNumber(live?.summary?.callsOnHold) ||
-      safeNumber(latestSnapshot["Calls On Hold"]) ||
-      safeNumber(latestSnapshot.callsOnHold);
-
-    const agentsAvailable =
-      safeNumber(live?.summary?.agentsAvailable) ||
-      safeNumber(latestSnapshot["Agents Available"]) ||
-      safeNumber(latestSnapshot.agentsAvailable);
-
-    return buildScheduleSummary(
-      scheduleCoverageLatest,
-      scheduleFlagsToday,
-      schedulesToday,
-      importedScheduleCoverage,
-      { callsOnHold, agentsAvailable }
-    );
-  }, [scheduleCoverageLatest, scheduleFlagsToday, schedulesToday, importedScheduleCoverage, live, latestSnapshot]);
+    return buildScheduleSummary(scheduleCoverageLatest, scheduleFlagsToday, schedulesToday);
+  }, [scheduleCoverageLatest, scheduleFlagsToday, schedulesToday]);
 
   const activeWatchlist = useMemo(() => {
     return watchlist.filter((item) => {
@@ -2546,10 +1369,6 @@ function App() {
     return buildCallbackExposureStory(summary, snapshotStats, todaySnapshots, recentSnapshots);
   }, [summary, snapshotStats, todaySnapshots, recentSnapshots]);
 
-  const callerExposureView = useMemo(() => {
-    return buildCallerExposureView(callerExposureToday, callerExposureSummary, liveRows, summary);
-  }, [callerExposureToday, callerExposureSummary, liveRows, summary]);
-
   const statDetails = useMemo(() => {
     const callsOnHold = safeNumber(summary.callsOnHold);
     const agentsAvailable = safeNumber(summary.agentsAvailable);
@@ -2789,23 +1608,22 @@ function App() {
 
 
       scheduleRisk: {
-        eyebrow: "Schedule visibility",
-        title: "Schedule Visibility Review",
-        subtitle: "This uses only schedules + the queue link to show who needs vendor status confirmation during queue exposure.",
-        valueLabel: "Rows needing validation",
-        value: scheduleSummary.phoneCoverageRisk,
-        status: scheduleSummary.phoneCoverageRisk > 0 ? "Schedule visibility review needed" : "No schedule visibility issue showing",
+        eyebrow: "Schedule adherence",
+        title: "Schedule Risk",
+        subtitle: "This compares imported June Voice / Customer Service schedules against the current queue snapshot.",
+        valueLabel: "Schedule risk flags",
+        value: scheduleSummary.riskCount,
+        status: scheduleSummary.riskCount > 0 ? "Adherence review needed" : "No schedule risk showing",
         statusClass: scheduleSummary.riskCount > 0 ? "risk-high" : "risk-low",
         meaning:
-          scheduleSummary.phoneCoverageRisk > 0
-            ? "These are schedule rows where expected coverage does not line up with queue visibility. When customers are waiting, Scheduled Not Visible is the priority validation list."
-            : "No scheduled-not-visible coverage issue is showing from the latest imported schedule comparison.",
+          scheduleSummary.riskCount > 0
+            ? "These are agents or vendors where the imported schedule does not line up with the queue snapshot. This is an investigation flag, not final proof, because the queue snapshot may not show every logged-in agent."
+            : "No schedule-adherence issue is showing from the latest imported schedule comparison.",
         evidence: [
-          `${scheduleSummary.scheduledNow} agents are scheduled now based on imported schedules.`,
-          `${scheduleSummary.seenInQueue} scheduled agents were visible in the queue snapshot.`,
-          `${scheduleSummary.scheduledButNotSeen} scheduled agents were not visible in the queue snapshot.`,
-          `${scheduleSummary.callsOnHold} calls are currently on hold while ${scheduleSummary.agentsAvailable} agents are available.`,
-          `${scheduleSummary.offButSeen} agents marked off/leave were visible in the queue snapshot.`,
+          `${scheduleSummary.scheduledNow} agents are scheduled to be working now.`,
+          `${scheduleSummary.seenInQueue} scheduled agents were seen in the queue snapshot.`,
+          `${scheduleSummary.scheduledButNotSeen} scheduled agents were not seen in the queue snapshot.`,
+          `${scheduleSummary.offButSeen} agents marked off/leave were seen in the queue snapshot.`,
           `${scheduleSummary.onBreakLunch} agents are inside scheduled break/lunch windows.`,
           `${scheduleSummary.missingNameMap} schedule rows need name mapping before they can be matched safely.`,
           scheduleSummary.checkedAt
@@ -2813,11 +1631,10 @@ function App() {
             : "No schedule check timestamp loaded yet.",
         ],
         actions:
-          scheduleSummary.phoneCoverageRisk > 0
+          scheduleSummary.riskCount > 0
             ? [
-                "Open the Scheduled Not Visible list in the Schedule Adherence panel.",
-                "Send the vendor/team lead the agent names and ask who is logged in, available, on a call, unavailable, on break/lunch, or not logged in.",
-                "When calls are waiting, prioritize scheduled agents not visible before random QA review.",
+                "Open the Schedule Adherence Flags tab in Google Sheets.",
+                "Confirm if the agent is logged in, available, on call, on break, or not logged in.",
                 "For Buwelo EDS codes, fill the Schedule Name Map tab if the agent name is missing.",
                 "Coach only after confirming the live status; use this as the starting point for investigation.",
               ]
@@ -2955,7 +1772,7 @@ function App() {
     <div className="sheet-load-banner">
   {loading
     ? "Loading Watchtower data from Google Sheets and live queue..."
-    : `Loaded today's critical agents, average scores, and snapshot evidence from Google Sheets. Last update: ${lastLoaded} | Watchlist: ${activeWatchlist.length} | Daily Critical: ${dailyCritical.length} | Live Metrics: ${liveAgentMetrics.length} | Flagged Agents: ${flaggedAgents.length} | Phone Coverage Risk: ${scheduleSummary.phoneCoverageRisk} | Caller Numbers: ${callerExposureView.uniqueCallers}`}
+    : `Loaded today's critical agents, average scores, and snapshot evidence from Google Sheets. Last update: ${lastLoaded} | Watchlist: ${activeWatchlist.length} | Daily Critical: ${dailyCritical.length} | Live Metrics: ${liveAgentMetrics.length} | Flagged Agents: ${flaggedAgents.length} | Schedule Risk: ${scheduleSummary.riskCount} | Caller Numbers: ${callerExposureSummary.uniqueCallers}`}
 </div>
 
       <section className="stats-grid">
@@ -3015,12 +1832,11 @@ function App() {
         <StatCard
           icon={<PhoneCall size={22} />}
           label="Caller Exposure"
-          value={callerExposureView.uniqueCallers}
-          sub={`${callerExposureView.callbackRiskCallers} callback-risk callers`}
-          danger={callerExposureView.voicemailRiskCallers > 0}
-          warning={callerExposureView.callbackRiskCallers > 0}
-          onClick={() => setCallerExposureModalOpen(true)}
-          tip="Saves caller phone numbers from the queue link so they can later be matched against the Tableau callback report."
+          value={callerExposureSummary.uniqueCallers}
+          sub="Click for full phone numbers"
+          warning={callerExposureSummary.callbackRiskCallers > 0}
+          onClick={() => setCallerExposureOpen(true)}
+          tip="Shows the full caller phone numbers captured from the queue link so they can be matched against Tableau callback reports."
           loading={cardsAreLoading}
           countdown={refreshCountdown}
           refreshSeconds={AUTO_REFRESH_SECONDS}
@@ -3055,13 +1871,13 @@ function App() {
 
         <StatCard
           icon={<CalendarCheck size={22} />}
-          label="Schedule Visibility"
-          value={scheduleSummary.phoneCoverageRisk}
-          sub="Click for schedule visibility"
-          danger={scheduleSummary.callsOnHold > 0 && scheduleSummary.scheduledButNotSeen > 0}
-          warning={scheduleSummary.riskCount > 0 || scheduleSummary.missingNameMap > 0}
+          label="Schedule Risk"
+          value={scheduleSummary.riskCount}
+          sub="Click for adherence details"
+          danger={scheduleSummary.scheduledButNotSeen > 0}
+          warning={scheduleSummary.riskCount > 0}
           onClick={() => setStatDetail(statDetails.scheduleRisk)}
-          tip="Uses schedules + queue link only. It identifies who needs vendor live-status confirmation during queue exposure."
+          tip="Compares imported June Voice / Customer Service schedules against the current queue snapshot for TEP, Buwelo, and WNS."
           loading={cardsAreLoading}
           countdown={refreshCountdown}
           refreshSeconds={AUTO_REFRESH_SECONDS}
@@ -3658,16 +2474,17 @@ function App() {
         }}
       />
 
-      <CallerExposureModal
-        open={callerExposureModalOpen}
-        onClose={() => setCallerExposureModalOpen(false)}
-        data={callerExposureView}
-      />
-
       <FlaggedAgentsModal
         open={flaggedModalOpen}
         onClose={() => setFlaggedModalOpen(false)}
         agents={flaggedAgents}
+      />
+
+      <CallerExposureModal
+        open={callerExposureOpen}
+        onClose={() => setCallerExposureOpen(false)}
+        rows={callerExposureToday}
+        summary={callerExposureSummary}
       />
     </main>
   );
